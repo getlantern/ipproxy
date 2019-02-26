@@ -1,7 +1,7 @@
 package ipproxy
 
 import (
-	// "context"
+	"context"
 	"io"
 	"net"
 	"sync/atomic"
@@ -35,24 +35,23 @@ func TestTCPandUDP(t *testing.T) {
 		dev.Close()
 	}()
 
-	// d := &net.Dialer{}
+	d := &net.Dialer{}
 	p, err := New(dev, &Opts{
 		IdleTimeout: idleTimeout,
-		// InterfaceAddr: "10.0.0.1",
-		// DialTCP: func(ctx context.Context, network, addr string) (net.Conn, error) {
-		// 	// Send everything to local echo server
-		// 	_, port, _ := net.SplitHostPort(addr)
-		// 	return d.DialContext(ctx, network, ip+":"+port)
-		// },
-		// DialUDP: func(ctx context.Context, network, addr string) (*net.UDPConn, error) {
-		// 	// Send everything to local echo server
-		// 	_, port, _ := net.SplitHostPort(addr)
-		// 	conn, dialErr := net.Dial(network, ip+":"+port)
-		// 	if dialErr != nil {
-		// 		return nil, dialErr
-		// 	}
-		// 	return conn.(*net.UDPConn), nil
-		// },
+		DialTCP: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// Send everything to local echo server
+			_, port, _ := net.SplitHostPort(addr)
+			return d.DialContext(ctx, network, ip+":"+port)
+		},
+		DialUDP: func(ctx context.Context, network, addr string) (*net.UDPConn, error) {
+			// Send everything to local echo server
+			_, port, _ := net.SplitHostPort(addr)
+			conn, dialErr := net.Dial(network, ip+":"+port)
+			if dialErr != nil {
+				return nil, dialErr
+			}
+			return conn.(*net.UDPConn), nil
+		},
 	})
 	if !assert.NoError(t, err) {
 		return

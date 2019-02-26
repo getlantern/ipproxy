@@ -54,28 +54,22 @@ func (pkt ipPacket) parseV4() (ipPacket, error) {
 	return pkt, nil
 }
 
-func (pkt ipPacket) srcPort() uint16 {
-	return networkByteOrder.Uint16(pkt.payload[0:2])
-}
-
-func (pkt ipPacket) dstPort() uint16 {
-	return networkByteOrder.Uint16(pkt.payload[2:4])
-}
-
-func (pkt ipPacket) fourtuple() fourtuple {
-	return fourtuple{
-		localIP:    pkt.srcAddr.String(),
-		remoteIP:   pkt.dstAddr.String(),
-		localPort:  pkt.srcPort(),
-		remotePort: pkt.dstPort(),
+func (pkt ipPacket) ft() fivetuple {
+	return fivetuple{
+		ipProto: pkt.ipProto,
+		srcIP:   pkt.srcAddr.String(),
+		dstIP:   pkt.dstAddr.String(),
+		srcPort: networkByteOrder.Uint16(pkt.payload[0:2]),
+		dstPort: networkByteOrder.Uint16(pkt.payload[2:4]),
 	}
 }
 
-type fourtuple struct {
-	localIP, remoteIP     string
-	localPort, remotePort uint16
+type fivetuple struct {
+	ipProto          uint8
+	srcIP, dstIP     string
+	srcPort, dstPort uint16
 }
 
-func (ft fourtuple) String() string {
-	return fmt.Sprintf("%v:%v -> %v:%v", ft.localIP, ft.localPort, ft.remoteIP, ft.remotePort)
+func (ft fivetuple) String() string {
+	return fmt.Sprintf("[%d] %v:%v -> %v:%v", ft.ipProto, ft.srcIP, ft.dstIP, ft.srcPort, ft.dstPort)
 }

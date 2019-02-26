@@ -3,7 +3,9 @@
 package ipproxy
 
 import (
+	"context"
 	"io"
+	"net"
 	"strings"
 	"time"
 
@@ -57,6 +59,14 @@ type Opts struct {
 	// NICID is the internal id for the link-local interface. Usually the default
 	// value is fine.
 	NICID int
+
+	// DialTCP specifies a function for dialing upstream TCP connections. Defaults
+	// to net.Dialer.DialContext().
+	DialTCP func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	// DialUDP specifies a function for dialing upstream UDP connections. Defaults
+	// to net.Dialer.DialContext().
+	DialUDP func(ctx context.Context, network, addr string) (*net.UDPConn, error)
 }
 
 func (opts *Opts) setDefaults() {
@@ -74,6 +84,20 @@ func (opts *Opts) setDefaults() {
 	}
 	if opts.NICID <= 0 {
 		opts.NICID = DefaultNICID
+	}
+	if opts.DialTCP == nil {
+		d := &net.Dialer{}
+		opts.DialTCP = d.DialContext
+	}
+	if opts.DialUDP == nil {
+		d := &net.Dialer{}
+		opts.DialUDP = func(ctx context.Context, network, addr string) (*net.UDPConn, error) {
+			conn, err := d.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return conn.(*net.UDPConn), nil
+		}
 	}
 }
 
@@ -98,9 +122,12 @@ type proxy struct {
 	stack      *stack.Stack
 	pool       *bpool.BytePool
 
-	udpConnTrack map[fourtuple]interface{}
+	udpConnTrack map[fivetuple]*udpConn
 
 	closeCh chan interface{}
+
+	dialTCP func(context.Context, string, string) (net.Conn, error)
+	dialUDP func(context.Context, string, string) (*net.UDPConn, error)
 }
 
 func (p *proxy) Serve() error {
@@ -138,7 +165,9 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		endpoint:     endpoint,
 		stack:        s,
 		pool:         bpool.NewBytePool(opts.BufferPoolSize, opts.MTU),
-		udpConnTrack: make(map[fourtuple]interface{}, 0),
+		udpConnTrack: make(map[fivetuple]*udpConn, 0),
+		dialTCP:      opts.DialTCP,
+		dialUDP:      opts.DialUDP,
 	}
 
 	return p, nil
