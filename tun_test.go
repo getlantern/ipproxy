@@ -163,6 +163,7 @@ func udpEcho(t *testing.T, closeCh <-chan interface{}, echoAddr string) {
 				t.Error(err)
 				return
 			}
+			log.Debugf("Got packet! Addr: %v", addr)
 			conn.WriteTo(b[:n], addr)
 		}
 	}()

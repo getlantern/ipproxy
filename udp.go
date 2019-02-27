@@ -3,6 +3,7 @@ package ipproxy
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 
@@ -29,7 +30,7 @@ func (p *proxy) onUDP(pkt ipPacket) {
 	}
 
 	log.Debugf("Injecting packet")
-	p.endpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
+	p.channelEndpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
 }
 
 func (p *proxy) startUDPConn(ft fivetuple) (*udpConn, error) {
@@ -40,17 +41,47 @@ func (p *proxy) startUDPConn(ft fivetuple) (*udpConn, error) {
 	if err != nil {
 		return nil, errors.New("Unable to dial upstream %v: %v", upstreamAddr, err)
 	}
+	log.Debugf("%v -> %v", upstream.LocalAddr(), upstream.RemoteAddr())
 
-	conn := &udpConn{
-		Conn:    upstream,
-		ft:      ft,
-		closeCh: make(chan struct{}),
+	upstreamIPAddr := tcpip.Address(net.ParseIP(ft.dstIP).To4())
+	nicID := p.nextNICID()
+	if err := p.stack.CreateNIC(nicID, p.linkID); err != nil {
+		return nil, errors.New("Unable to create NIC: %v", err)
+	}
+	if err := p.stack.AddAddress(nicID, p.proto, upstreamIPAddr); err != nil {
+		return nil, errors.New("Unable to assign NIC address: %v", err)
 	}
 
-	var stackErr *tcpip.Error
-	conn.ep, stackErr = p.stack.NewEndpoint(udp.ProtocolNumber, p.proto, &conn.wq)
-	if stackErr != nil {
-		return nil, errors.New("Unable to create UDP endpoint: %v", stackErr)
+	downstreamIPAddr := tcpip.Address(net.ParseIP(ft.srcIP).To4())
+
+	// Add default route that routes all IPv4 packets for the given upstream address
+	// to our NIC and routes packets to the downstreamIPAddr as well,
+	p.stack.SetRouteTable([]tcpip.Route{
+		{
+			Destination: upstreamIPAddr,
+			Mask:        tcpip.AddressMask(upstreamIPAddr),
+			Gateway:     "",
+			NIC:         nicID,
+		},
+		{
+			Destination: downstreamIPAddr,
+			Mask:        tcpip.AddressMask(downstreamIPAddr),
+			Gateway:     "",
+			NIC:         nicID,
+		},
+	})
+
+	conn := &udpConn{
+		downstreamAddr: &tcpip.FullAddress{0, downstreamIPAddr, ft.srcPort},
+		upstream:       upstream,
+		ft:             ft,
+		closeCh:        make(chan struct{}),
+	}
+
+	var epErr *tcpip.Error
+	conn.ep, epErr = p.stack.NewEndpoint(udp.ProtocolNumber, p.proto, &conn.wq)
+	if epErr != nil {
+		return nil, errors.New("Unable to create UDP endpoint: %v", epErr)
 	}
 
 	// Wait for connections to appear.
@@ -59,25 +90,26 @@ func (p *proxy) startUDPConn(ft fivetuple) (*udpConn, error) {
 	conn.notifyCh = _notifyCh
 	conn.wq.EventRegister(conn.waitEntry, waiter.EventIn)
 
-	if err := conn.ep.Bind(tcpip.FullAddress{0, "", ft.dstPort}, nil); err != nil {
+	if err := conn.ep.Bind(tcpip.FullAddress{nicID, upstreamIPAddr, ft.dstPort}, nil); err != nil {
 		conn.finalize()
 		return nil, errors.New("UDP bind failed: %v", err)
 	}
 
 	go conn.copyToUpstream()
-
+	go conn.copyFromUpstream()
 	return conn, nil
 }
 
 type udpConn struct {
-	net.Conn
-	ft        fivetuple
-	ep        tcpip.Endpoint
-	wq        waiter.Queue
-	waitEntry *waiter.Entry
-	notifyCh  chan struct{}
-	closeCh   chan struct{}
-	closeOnce sync.Once
+	downstreamAddr *tcpip.FullAddress
+	upstream       io.ReadWriteCloser
+	ft             fivetuple
+	ep             tcpip.Endpoint
+	wq             waiter.Queue
+	waitEntry      *waiter.Entry
+	notifyCh       chan struct{}
+	closeCh        chan struct{}
+	closeOnce      sync.Once
 }
 
 func (conn *udpConn) copyToUpstream() {
@@ -89,12 +121,40 @@ func (conn *udpConn) copyToUpstream() {
 			return
 		case <-conn.notifyCh:
 			addr := &tcpip.FullAddress{0, "", conn.ft.dstPort}
-			buf, _, err := conn.ep.Read(addr)
-			if err != nil {
-				log.Errorf("Error reading packet from downstream, ignoring: %v", err)
+			buf, _, readErr := conn.ep.Read(addr)
+			if readErr != nil {
+				log.Errorf("Unexpected error reading from downstream: %v", readErr)
 				continue
 			}
-			log.Debugf("Got udp packet: %v", buf)
+			_, writeErr := conn.upstream.Write(buf)
+			if writeErr != nil {
+				log.Errorf("Unexpected error writing to upstream: %v", writeErr)
+				return
+			}
+		}
+	}
+}
+
+func (conn *udpConn) copyFromUpstream() {
+	b := make([]byte, 1500) // TODO: use pooled and correct MTU
+	for {
+		n, readErr := conn.upstream.Read(b)
+		if readErr != nil {
+			if neterr, ok := readErr.(net.Error); ok && neterr.Temporary() {
+				continue
+			}
+			if readErr != io.EOF {
+				log.Errorf("Unexpected error reading from upstream: %v", readErr)
+			}
+			return
+		}
+		log.Debugf("Read response: %v", string(b[:n]))
+		_, _, writeErr := conn.ep.Write(tcpip.SlicePayload(b[:n]), tcpip.WriteOptions{
+			To: conn.downstreamAddr,
+		})
+		if writeErr != nil {
+			log.Errorf("Unexpected error writing to downstream: %v", writeErr)
+			return
 		}
 	}
 }
@@ -108,5 +168,10 @@ func (conn *udpConn) Close() error {
 
 func (conn *udpConn) finalize() {
 	conn.wq.EventUnregister(conn.waitEntry)
-	conn.ep.Close()
+	if conn.ep != nil {
+		conn.ep.Close()
+	}
+	if conn.upstream != nil {
+		conn.upstream.Close()
+	}
 }

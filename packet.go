@@ -71,5 +71,5 @@ type fivetuple struct {
 }
 
 func (ft fivetuple) String() string {
-	return fmt.Sprintf("[%d] %v:%v -> %v:%v", ft.ipProto, ft.srcIP, ft.dstIP, ft.srcPort, ft.dstPort)
+	return fmt.Sprintf("[%d] %v:%v -> %v:%v", ft.ipProto, ft.srcIP, ft.srcPort, ft.dstIP, ft.dstPort)
 }

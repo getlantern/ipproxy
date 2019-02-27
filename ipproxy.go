@@ -6,12 +6,11 @@ import (
 	"context"
 	"io"
 	"net"
-	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/link/channel"
-	"github.com/google/netstack/tcpip/network/arp"
 	"github.com/google/netstack/tcpip/network/ipv4"
 	"github.com/google/netstack/tcpip/network/ipv6"
 	"github.com/google/netstack/tcpip/stack"
@@ -116,11 +115,14 @@ type proxy struct {
 	acceptedPackets int64
 	rejectedPackets int64
 
-	proto      tcpip.NetworkProtocolNumber
-	downstream io.ReadWriter
-	endpoint   *channel.Endpoint
-	stack      *stack.Stack
-	pool       *bpool.BytePool
+	currentNICID uint32
+
+	proto           tcpip.NetworkProtocolNumber
+	downstream      io.ReadWriter
+	linkID          tcpip.LinkEndpointID
+	channelEndpoint *channel.Endpoint
+	stack           *stack.Stack
+	pool            *bpool.BytePool
 
 	udpConnTrack map[fivetuple]*udpConn
 
@@ -131,6 +133,7 @@ type proxy struct {
 }
 
 func (p *proxy) Serve() error {
+	go p.copyFromUpstream()
 	return p.copyToUpstream()
 }
 
@@ -141,33 +144,19 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 	}
 	opts.setDefaults()
 
-	s := stack.New([]string{ipv4.ProtocolName, ipv6.ProtocolName, arp.ProtocolName}, []string{tcp.ProtocolName, udp.ProtocolName}, stack.Options{})
-
-	linkID, endpoint := channel.New(opts.OutboundBufferDepth, uint32(opts.MTU), "")
-	if err := s.CreateNIC(1, linkID); err != nil {
-		return nil, errors.New("Unable to create NIC: %v", err)
-	}
-	s.SetPromiscuousMode(1, true)
-
-	// Add default route that routes all IPv4 packets to our interface
-	s.SetRouteTable([]tcpip.Route{
-		{
-			Destination: tcpip.Address(strings.Repeat("\x00", 4)),
-			Mask:        tcpip.AddressMask(strings.Repeat("\x00", 4)),
-			Gateway:     "",
-			NIC:         1,
-		},
-	})
+	linkID, channelEndpoint := channel.New(opts.OutboundBufferDepth, uint32(opts.MTU), "")
+	s := stack.New([]string{ipv4.ProtocolName, ipv6.ProtocolName}, []string{tcp.ProtocolName, udp.ProtocolName}, stack.Options{})
 
 	p := &proxy{
-		proto:        ipv4.ProtocolNumber,
-		downstream:   downstream,
-		endpoint:     endpoint,
-		stack:        s,
-		pool:         bpool.NewBytePool(opts.BufferPoolSize, opts.MTU),
-		udpConnTrack: make(map[fivetuple]*udpConn, 0),
-		dialTCP:      opts.DialTCP,
-		dialUDP:      opts.DialUDP,
+		proto:           ipv4.ProtocolNumber,
+		downstream:      downstream,
+		linkID:          linkID,
+		channelEndpoint: channelEndpoint,
+		stack:           s,
+		pool:            bpool.NewBytePool(opts.BufferPoolSize, opts.MTU),
+		udpConnTrack:    make(map[fivetuple]*udpConn, 0),
+		dialTCP:         opts.DialTCP,
+		dialUDP:         opts.DialUDP,
 	}
 
 	return p, nil
@@ -203,4 +192,22 @@ func (p *proxy) copyToUpstream() error {
 			continue
 		}
 	}
+}
+
+func (p *proxy) copyFromUpstream() {
+	for pktInfo := range p.channelEndpoint.C {
+		pkt := make([]byte, 0, len(pktInfo.Header)+len(pktInfo.Payload))
+		pkt = append(pkt, pktInfo.Header...)
+		pkt = append(pkt, pktInfo.Payload...)
+		_, err := p.downstream.Write(pkt)
+		if err != nil {
+			log.Errorf("Unexpected error writing to downstream: %v", err)
+			return
+		}
+		log.Debug("Wrote to downstream")
+	}
+}
+
+func (p *proxy) nextNICID() tcpip.NICID {
+	return tcpip.NICID(atomic.AddUint32(&p.currentNICID, 1))
 }
