@@ -80,6 +80,7 @@ func (p *proxy) startUDPConn(ft fivetuple) (*udpConn, error) {
 		upstream:       upstream,
 		ft:             ft,
 		closeCh:        make(chan struct{}),
+		closedCh:       make(chan error),
 	}
 	conn.markActive()
 
@@ -116,11 +117,15 @@ type udpConn struct {
 	waitEntry      *waiter.Entry
 	notifyCh       chan struct{}
 	closeCh        chan struct{}
+	closedCh       chan error
 	closeOnce      sync.Once
 }
 
 func (conn *udpConn) copyToUpstream() {
-	defer conn.finalize()
+	defer func() {
+		conn.closedCh <- conn.finalize()
+		close(conn.closedCh)
+	}()
 
 	for {
 		select {
@@ -176,26 +181,34 @@ func (conn *udpConn) timeSinceLastActive() time.Duration {
 	return time.Duration(time.Now().UnixNano() - atomic.LoadInt64(&conn.lastActive))
 }
 
-func (conn *udpConn) Close() error {
+// Close stops the loop that writes to upstream, which eventually causes
+// finalize to run.
+func (conn *udpConn) Close() (err error) {
 	conn.closeOnce.Do(func() {
 		close(conn.closeCh)
+		err = <-conn.closedCh
 	})
-	return nil
+	return
 }
 
-func (conn *udpConn) finalize() {
+// finalize does the actual cleaning up of the connection. It runs at the end
+// of the loop that writes to upstream.
+func (conn *udpConn) finalize() (err error) {
 	conn.wq.EventUnregister(conn.waitEntry)
 	if conn.ep != nil {
 		conn.ep.Close()
 	}
 	if conn.upstream != nil {
-		conn.upstream.Close()
+		err = conn.upstream.Close()
 	}
 	conn.p.udpConnTrackMx.Lock()
 	delete(conn.p.udpConnTrack, conn.ft)
 	conn.p.udpConnTrackMx.Unlock()
+	return
 }
 
+// reapUDP reaps idled UDP connections. We do this on a single goroutine to
+// avoid creating a bunch of timers for each connection (which is expensive).
 func (p *proxy) reapUDP() {
 	for {
 		time.Sleep(1 * time.Second)
@@ -207,8 +220,26 @@ func (p *proxy) reapUDP() {
 		p.udpConnTrackMx.Unlock()
 		for _, conn := range conns {
 			if conn.timeSinceLastActive() > p.opts.IdleTimeout {
-				conn.Close()
+				go conn.Close()
 			}
 		}
 	}
+}
+
+func (p *proxy) finalizeUDP() (err error) {
+	p.udpConnTrackMx.Lock()
+	conns := make([]*udpConn, 0)
+	for _, conn := range p.udpConnTrack {
+		conns = append(conns, conn)
+	}
+	p.udpConnTrackMx.Unlock()
+
+	for _, conn := range conns {
+		_err := conn.Close()
+		if err == nil {
+			err = _err
+		}
+	}
+
+	return
 }

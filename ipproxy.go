@@ -1,5 +1,5 @@
-// Packate ipproxy provides a facility for proxying IP traffic. Current it only
-// supports IPv4.
+// Packate ipproxy provides a facility for proxying IP traffic. Currently it
+// only supports TCP and UDP on top of IPv4.
 package ipproxy
 
 import (
@@ -110,6 +110,10 @@ type Proxy interface {
 
 	// NumUDPConns returns the current number of UDP connections being tracked
 	NumUDPConns() int
+
+	// Close shuts down the proxy in an orderly fashion and blocks until shutdown
+	// is complete.
+	Close() error
 }
 
 type proxy struct {
@@ -129,7 +133,9 @@ type proxy struct {
 	udpConnTrack   map[fivetuple]*udpConn
 	udpConnTrackMx sync.Mutex
 
-	closeCh chan interface{}
+	closeCh   chan struct{}
+	closedCh  chan error
+	closeOnce sync.Once
 }
 
 func (p *proxy) Serve() error {
@@ -158,12 +164,21 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		stack:           s,
 		pool:            bpool.NewBytePool(opts.BufferPoolSize, opts.MTU),
 		udpConnTrack:    make(map[fivetuple]*udpConn, 0),
+		closeCh:         make(chan struct{}),
+		closedCh:        make(chan error),
 	}
 
 	return p, nil
 }
 
 func (p *proxy) copyToUpstream() error {
+	defer func() {
+		err := p.finalize()
+		close(p.channelEndpoint.C)
+		p.closedCh <- err
+		close(p.closedCh)
+	}()
+
 	for {
 		b := p.pool.Get()
 		n, err := p.downstream.Read(b)
@@ -212,4 +227,16 @@ func (p *proxy) copyFromUpstream() {
 
 func (p *proxy) nextNICID() tcpip.NICID {
 	return tcpip.NICID(atomic.AddUint32(&p.currentNICID, 1))
+}
+
+func (p *proxy) Close() (err error) {
+	p.closeOnce.Do(func() {
+		close(p.closeCh)
+		err = <-p.closedCh
+	})
+	return
+}
+
+func (p *proxy) finalize() error {
+	return p.finalizeUDP()
 }
