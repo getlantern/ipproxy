@@ -6,13 +6,13 @@ import (
 )
 
 func (p *proxy) trackStats() {
-	ticker := time.NewTicker(15 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
 	for {
 		select {
 		case <-p.closeCh:
 			return
 		case <-ticker.C:
-			// log.Debugf("TCP Conns: %v    UDP Conns: %v", p.NumTCPConns(), p.NumUDPConns())
+			log.Debugf("TCP Conns: %v    UDP Conns: %v", p.NumTCPConns(), p.NumUDPConns())
 			log.Debugf("Accepted Packets: %d    Rejected Packets: %d", p.AcceptedPackets(), p.RejectedPackets())
 		}
 	}
@@ -28,12 +28,10 @@ func (p *proxy) NumTCPConns() int {
 }
 
 func (p *proxy) NumUDPConns() int {
-	// p.udpConnTrackMx.Lock()
-	// udpConns := len(p.udpConnTrack)
-	// p.udpConnTrackMx.Unlock()
-	// return udpConns
-	return 0
-	// TODO: implement
+	p.udpConnTrackMx.Lock()
+	udpConns := len(p.udpConnTrack)
+	p.udpConnTrackMx.Unlock()
+	return udpConns
 }
 
 func (p *proxy) acceptedPacket() {

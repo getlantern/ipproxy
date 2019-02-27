@@ -18,7 +18,9 @@ import (
 
 func (p *proxy) onUDP(pkt ipPacket) {
 	ft := pkt.ft()
+	p.udpConnTrackMx.Lock()
 	conn := p.udpConnTrack[ft]
+	p.udpConnTrackMx.Unlock()
 	if conn == nil {
 		var err error
 		conn, err = p.startUDPConn(ft)
@@ -26,7 +28,9 @@ func (p *proxy) onUDP(pkt ipPacket) {
 			log.Error(err)
 			return
 		}
+		p.udpConnTrackMx.Lock()
 		p.udpConnTrack[ft] = conn
+		p.udpConnTrackMx.Unlock()
 	}
 
 	log.Debugf("Injecting packet")

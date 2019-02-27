@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -124,7 +125,8 @@ type proxy struct {
 	stack           *stack.Stack
 	pool            *bpool.BytePool
 
-	udpConnTrack map[fivetuple]*udpConn
+	udpConnTrack   map[fivetuple]*udpConn
+	udpConnTrackMx sync.Mutex
 
 	closeCh chan interface{}
 
@@ -133,6 +135,7 @@ type proxy struct {
 }
 
 func (p *proxy) Serve() error {
+	go p.trackStats()
 	go p.copyFromUpstream()
 	return p.copyToUpstream()
 }
