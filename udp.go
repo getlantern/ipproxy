@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/buffer"
@@ -38,7 +41,7 @@ func (p *proxy) onUDP(pkt ipPacket) {
 
 func (p *proxy) startUDPConn(ft fivetuple) (*udpConn, error) {
 	upstreamAddr := fmt.Sprintf("%v:%d", ft.dstIP, ft.dstPort)
-	upstream, err := p.dialUDP(context.Background(), "udp", upstreamAddr)
+	upstream, err := p.opts.DialUDP(context.Background(), "udp", upstreamAddr)
 	if err != nil {
 		return nil, errors.New("Unable to dial upstream %v: %v", upstreamAddr, err)
 	}
@@ -72,11 +75,13 @@ func (p *proxy) startUDPConn(ft fivetuple) (*udpConn, error) {
 	})
 
 	conn := &udpConn{
+		p:              p,
 		downstreamAddr: &tcpip.FullAddress{0, downstreamIPAddr, ft.srcPort},
 		upstream:       upstream,
 		ft:             ft,
 		closeCh:        make(chan struct{}),
 	}
+	conn.markActive()
 
 	var epErr *tcpip.Error
 	conn.ep, epErr = p.stack.NewEndpoint(udp.ProtocolNumber, p.proto, &conn.wq)
@@ -101,6 +106,8 @@ func (p *proxy) startUDPConn(ft fivetuple) (*udpConn, error) {
 }
 
 type udpConn struct {
+	lastActive     int64
+	p              *proxy
 	downstreamAddr *tcpip.FullAddress
 	upstream       io.ReadWriteCloser
 	ft             fivetuple
@@ -131,19 +138,21 @@ func (conn *udpConn) copyToUpstream() {
 				log.Errorf("Unexpected error writing to upstream: %v", writeErr)
 				return
 			}
+			conn.markActive()
 		}
 	}
 }
 
 func (conn *udpConn) copyFromUpstream() {
-	b := make([]byte, 1500) // TODO: use pooled and correct MTU
+	defer conn.Close()
+	b := conn.p.pool.Get()
 	for {
 		n, readErr := conn.upstream.Read(b)
 		if readErr != nil {
 			if neterr, ok := readErr.(net.Error); ok && neterr.Temporary() {
 				continue
 			}
-			if readErr != io.EOF {
+			if readErr != io.EOF && !strings.Contains(readErr.Error(), "use of closed network connection") {
 				log.Errorf("Unexpected error reading from upstream: %v", readErr)
 			}
 			return
@@ -155,7 +164,16 @@ func (conn *udpConn) copyFromUpstream() {
 			log.Errorf("Unexpected error writing to downstream: %v", writeErr)
 			return
 		}
+		conn.markActive()
 	}
+}
+
+func (conn *udpConn) markActive() {
+	atomic.StoreInt64(&conn.lastActive, time.Now().UnixNano())
+}
+
+func (conn *udpConn) timeSinceLastActive() time.Duration {
+	return time.Duration(time.Now().UnixNano() - atomic.LoadInt64(&conn.lastActive))
 }
 
 func (conn *udpConn) Close() error {
@@ -172,5 +190,25 @@ func (conn *udpConn) finalize() {
 	}
 	if conn.upstream != nil {
 		conn.upstream.Close()
+	}
+	conn.p.udpConnTrackMx.Lock()
+	delete(conn.p.udpConnTrack, conn.ft)
+	conn.p.udpConnTrackMx.Unlock()
+}
+
+func (p *proxy) reapUDP() {
+	for {
+		time.Sleep(1 * time.Second)
+		p.udpConnTrackMx.Lock()
+		conns := make([]*udpConn, 0)
+		for _, conn := range p.udpConnTrack {
+			conns = append(conns, conn)
+		}
+		p.udpConnTrackMx.Unlock()
+		for _, conn := range conns {
+			if conn.timeSinceLastActive() > p.opts.IdleTimeout {
+				conn.Close()
+			}
+		}
 	}
 }

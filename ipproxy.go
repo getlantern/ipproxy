@@ -118,6 +118,7 @@ type proxy struct {
 
 	currentNICID uint32
 
+	opts            *Opts
 	proto           tcpip.NetworkProtocolNumber
 	downstream      io.ReadWriter
 	linkID          tcpip.LinkEndpointID
@@ -129,13 +130,11 @@ type proxy struct {
 	udpConnTrackMx sync.Mutex
 
 	closeCh chan interface{}
-
-	dialTCP func(context.Context, string, string) (net.Conn, error)
-	dialUDP func(context.Context, string, string) (*net.UDPConn, error)
 }
 
 func (p *proxy) Serve() error {
 	go p.trackStats()
+	go p.reapUDP()
 	go p.copyFromUpstream()
 	return p.copyToUpstream()
 }
@@ -151,6 +150,7 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 	s := stack.New([]string{ipv4.ProtocolName, ipv6.ProtocolName}, []string{tcp.ProtocolName, udp.ProtocolName}, stack.Options{})
 
 	p := &proxy{
+		opts:            opts,
 		proto:           ipv4.ProtocolNumber,
 		downstream:      downstream,
 		linkID:          linkID,
@@ -158,8 +158,6 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		stack:           s,
 		pool:            bpool.NewBytePool(opts.BufferPoolSize, opts.MTU),
 		udpConnTrack:    make(map[fivetuple]*udpConn, 0),
-		dialTCP:         opts.DialTCP,
-		dialUDP:         opts.DialUDP,
 	}
 
 	return p, nil
@@ -199,7 +197,7 @@ func (p *proxy) copyToUpstream() error {
 
 func (p *proxy) copyFromUpstream() {
 	for pktInfo := range p.channelEndpoint.C {
-		pkt := make([]byte, 0, len(pktInfo.Header)+len(pktInfo.Payload))
+		pkt := p.pool.Get()[:0]
 		pkt = append(pkt, pktInfo.Header...)
 		pkt = append(pkt, pktInfo.Payload...)
 		_, err := p.downstream.Write(pkt)
@@ -207,6 +205,8 @@ func (p *proxy) copyFromUpstream() {
 			log.Errorf("Unexpected error writing to downstream: %v", err)
 			return
 		}
+		p.pool.Put(pkt)
+		p.pool.Put(pktInfo.Payload)
 	}
 }
 
