@@ -207,7 +207,6 @@ func (p *proxy) copyFromUpstream() {
 			log.Errorf("Unexpected error writing to downstream: %v", err)
 			return
 		}
-		log.Debug("Wrote to downstream")
 	}
 }
 

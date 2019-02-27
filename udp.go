@@ -33,19 +33,15 @@ func (p *proxy) onUDP(pkt ipPacket) {
 		p.udpConnTrackMx.Unlock()
 	}
 
-	log.Debugf("Injecting packet")
 	p.channelEndpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
 }
 
 func (p *proxy) startUDPConn(ft fivetuple) (*udpConn, error) {
-	log.Debugf("Creating udpConn for %v", ft)
-
 	upstreamAddr := fmt.Sprintf("%v:%d", ft.dstIP, ft.dstPort)
 	upstream, err := p.dialUDP(context.Background(), "udp", upstreamAddr)
 	if err != nil {
 		return nil, errors.New("Unable to dial upstream %v: %v", upstreamAddr, err)
 	}
-	log.Debugf("%v -> %v", upstream.LocalAddr(), upstream.RemoteAddr())
 
 	upstreamIPAddr := tcpip.Address(net.ParseIP(ft.dstIP).To4())
 	nicID := p.nextNICID()
@@ -152,7 +148,6 @@ func (conn *udpConn) copyFromUpstream() {
 			}
 			return
 		}
-		log.Debugf("Read response: %v", string(b[:n]))
 		_, _, writeErr := conn.ep.Write(tcpip.SlicePayload(b[:n]), tcpip.WriteOptions{
 			To: conn.downstreamAddr,
 		})
