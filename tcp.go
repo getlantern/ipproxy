@@ -128,6 +128,7 @@ func (p *proxy) reapTCP() {
 			dests[a] = dest
 		}
 		p.tcpConnTrackMx.Unlock()
+
 		for a, dest := range dests {
 			dest.connsMx.Lock()
 			conns := make([]*baseConn, 0, len(dest.conns))
@@ -145,8 +146,41 @@ func (p *proxy) reapTCP() {
 				p.tcpConnTrackMx.Lock()
 				delete(p.tcpConnTrack, a)
 				p.tcpConnTrackMx.Unlock()
-				dest.Close()
+				go dest.Close()
 			}
 		}
 	}
+}
+
+func (p *proxy) finalizeTCP() (err error) {
+	p.tcpConnTrackMx.Lock()
+	dests := make(map[addr]*tcpDest, len(p.tcpConnTrack))
+	for a, dest := range p.tcpConnTrack {
+		dests[a] = dest
+	}
+	p.tcpConnTrackMx.Unlock()
+
+	for _, dest := range dests {
+		dest.connsMx.Lock()
+		conns := make([]*baseConn, 0, len(dest.conns))
+		for _, conn := range dest.conns {
+			conns = append(conns, conn)
+		}
+		dest.connsMx.Unlock()
+		for _, conn := range dest.conns {
+			if conn.timeSinceLastActive() > p.opts.IdleTimeout {
+				_err := conn.Close()
+				if err == nil {
+					err = _err
+				}
+			}
+		}
+
+		_err := dest.Close()
+		if err == nil {
+			err = _err
+		}
+	}
+
+	return
 }

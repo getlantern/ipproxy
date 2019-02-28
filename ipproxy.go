@@ -230,5 +230,10 @@ func (p *proxy) nextNICID() tcpip.NICID {
 }
 
 func (p *proxy) finalize() error {
-	return p.finalizeUDP()
+	err := p.finalizeTCP()
+	_err := p.finalizeUDP()
+	if err == nil {
+		err = _err
+	}
+	return err
 }
