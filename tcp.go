@@ -80,6 +80,22 @@ func (dest *tcpDest) accept() {
 			return
 		}
 
+		// remote, _ := acceptedEp.GetRemoteAddress()
+		// local, _ := acceptedEp.GetLocalAddress()
+		// dest.p.stack.SetRouteTable([]tcpip.Route{
+		// 	{
+		// 		Destination: remote.Addr,
+		// 		Mask:        tcpip.AddressMask(remote.Addr),
+		// 		Gateway:     "",
+		// 		NIC:         1,
+		// 	},
+		// 	{
+		// 		Destination: local.Addr,
+		// 		Mask:        tcpip.AddressMask(local.Addr),
+		// 		Gateway:     "",
+		// 		NIC:         1,
+		// 	},
+		// })
 		upstream, dialErr := dest.p.opts.DialTCP(context.Background(), "tcp", dest.addr)
 		if dialErr != nil {
 			log.Errorf("Unexpected error dialing upstream to %v: %v", dest.addr, err)
@@ -108,21 +124,26 @@ func (conn *tcpConn) copyToUpstream() {
 	}()
 
 	for {
-		select {
-		case <-conn.closeCh:
-			return
-		case <-conn.notifyCh:
-			buf, _, readErr := conn.ep.Read(nil)
-			if readErr != nil {
+		buf, _, readErr := conn.ep.Read(nil)
+		if readErr != nil {
+			if readErr == tcpip.ErrWouldBlock {
+				select {
+				case <-conn.closeCh:
+					return
+				case <-conn.notifyCh:
+					continue
+				}
+			}
+			if !strings.Contains(readErr.String(), "endpoint is closed for receive") {
 				log.Errorf("Unexpected error reading from downstream: %v", readErr)
-				continue
 			}
-			if _, writeErr := conn.upstream.Write(buf); writeErr != nil {
-				log.Errorf("Unexpected error writing to upstream: %v", writeErr)
-				return
-			}
-			conn.markActive()
+			return
 		}
+		if _, writeErr := conn.upstream.Write(buf); writeErr != nil {
+			log.Errorf("Unexpected error writing to upstream: %v", writeErr)
+			return
+		}
+		conn.markActive()
 	}
 }
 
@@ -141,6 +162,7 @@ func (conn *tcpConn) copyFromUpstream() {
 			}
 			return
 		}
+
 		_, _, writeErr := conn.ep.Write(tcpip.SlicePayload(b[:n]), tcpip.WriteOptions{})
 		if writeErr != nil {
 			log.Errorf("Unexpected error writing to downstream: %v", writeErr)

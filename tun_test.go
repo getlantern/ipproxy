@@ -109,9 +109,7 @@ func TestTCPandUDP(t *testing.T) {
 		return
 	}
 	assert.Equal(t, "hellotcp", string(b))
-	log.Debug("TCP good!")
 	conn.Close()
-	log.Debug("TCP closed!")
 	time.Sleep(50 * time.Millisecond)
 	assert.Zero(t, p.NumTCPConns(), "TCP conn should be quickly purged from connection tracking")
 	assert.Zero(t, atomic.LoadInt64(&serverTCPConnections), "Server-side TCP connection should have been closed")
@@ -139,9 +137,13 @@ func tcpEcho(t *testing.T, closeCh <-chan interface{}, ip string) string {
 				t.Error(err)
 				return
 			}
-			atomic.AddInt64(&serverTCPConnections, 1)
-			go io.Copy(conn, conn)
-			atomic.AddInt64(&serverTCPConnections, -1)
+			go func() {
+				log.Debug("Copying TCP")
+				atomic.AddInt64(&serverTCPConnections, 1)
+				n, err := io.Copy(conn, conn)
+				log.Debugf("Finished copying TCP: %d: %v", n, err)
+				atomic.AddInt64(&serverTCPConnections, -1)
+			}()
 		}
 	}()
 
