@@ -109,6 +109,7 @@ func (dest *tcpDest) accept() {
 		tcpConn.ep = acceptedEp
 		go tcpConn.copyToUpstream(nil)
 		go tcpConn.copyFromUpstream(tcpip.WriteOptions{})
+		tcpConn.markActive()
 		dest.connsMx.Lock()
 		dest.conns[downstreamAddr] = &tcpConn
 		dest.connsMx.Unlock()

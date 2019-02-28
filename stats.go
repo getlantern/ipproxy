@@ -6,7 +6,7 @@ import (
 )
 
 func (p *proxy) trackStats() {
-	ticker := time.NewTicker(15 * time.Second)
+	ticker := time.NewTicker(p.opts.StatsInterval)
 	for {
 		select {
 		case <-p.closeCh:

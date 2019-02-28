@@ -33,6 +33,7 @@ const (
 	DefaultBufferPoolSize      = 100
 	DefaultIdleTimeout         = 65 * time.Second
 	DefaultTCPConnectBacklog   = 10
+	DefaultStatsInterval       = 15 * time.Second
 
 	IPProtocolTCP = 6
 	IPProtocolUDP = 17
@@ -59,6 +60,10 @@ type Opts struct {
 	// upstream port. Defaults to 10.
 	TCPConnectBacklog int
 
+	// StatsInterval controls how frequently to display stats. Defaults to 15
+	// seconds.
+	StatsInterval time.Duration
+
 	// DialTCP specifies a function for dialing upstream TCP connections. Defaults
 	// to net.Dialer.DialContext().
 	DialTCP func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -83,6 +88,9 @@ func (opts *Opts) setDefaults() {
 	}
 	if opts.TCPConnectBacklog <= 0 {
 		opts.TCPConnectBacklog = DefaultTCPConnectBacklog
+	}
+	if opts.StatsInterval <= 0 {
+		opts.StatsInterval = DefaultStatsInterval
 	}
 	if opts.DialTCP == nil {
 		d := &net.Dialer{}
