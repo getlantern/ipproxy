@@ -45,9 +45,12 @@ func (p *proxy) startTCPDest(dstAddr addr) (*tcpDest, error) {
 	}
 
 	dest := &tcpDest{
-		baseConn: newBaseConn(p, nil, nil),
-		addr:     dstAddr.String(),
-		conns:    make(map[tcpip.FullAddress]*baseConn),
+		baseConn: newBaseConn(p, nil, func() error {
+			p.removeTCPDest(dstAddr)
+			return nil
+		}),
+		addr:  dstAddr.String(),
+		conns: make(map[tcpip.FullAddress]*baseConn),
 	}
 	dest.markActive()
 
@@ -72,12 +75,21 @@ type tcpDest struct {
 }
 
 func (dest *tcpDest) accept() {
+	defer func() {
+		dest.closedCh <- dest.finalize()
+		close(dest.closedCh)
+	}()
+
 	for {
 		acceptedEp, wq, err := dest.ep.Accept()
 		if err != nil {
 			if err == tcpip.ErrWouldBlock {
-				<-dest.notifyCh
-				continue
+				select {
+				case <-dest.closeCh:
+					return
+				case <-dest.notifyCh:
+					continue
+				}
 			}
 			log.Errorf("Accept() failed: %v", err)
 			return
@@ -116,6 +128,12 @@ func (dest *tcpDest) numConns() int {
 	return numConns
 }
 
+func (p *proxy) removeTCPDest(dstAddr addr) {
+	p.tcpConnTrackMx.Lock()
+	delete(p.tcpConnTrack, dstAddr)
+	p.tcpConnTrackMx.Unlock()
+}
+
 // reapUDP reaps idled TCP connections and destinations. We do this on a single
 // goroutine to avoid creating a bunch of timers for each connection
 // (which is expensive).
@@ -143,9 +161,7 @@ func (p *proxy) reapTCP() {
 					}
 				}
 			} else if dest.timeSinceLastActive() > p.opts.IdleTimeout {
-				p.tcpConnTrackMx.Lock()
-				delete(p.tcpConnTrack, a)
-				p.tcpConnTrackMx.Unlock()
+				dest.p.removeTCPDest(a)
 				go dest.Close()
 			}
 		}
@@ -167,6 +183,7 @@ func (p *proxy) finalizeTCP() (err error) {
 			conns = append(conns, conn)
 		}
 		dest.connsMx.Unlock()
+
 		for _, conn := range dest.conns {
 			if conn.timeSinceLastActive() > p.opts.IdleTimeout {
 				_err := conn.Close()

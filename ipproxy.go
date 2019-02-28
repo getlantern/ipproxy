@@ -1,4 +1,4 @@
-// Packate ipproxy provides a facility for proxying IP traffic. Currently it
+// Package ipproxy provides a facility for proxying IP traffic. Currently it
 // only supports TCP and UDP on top of IPv4.
 package ipproxy
 
@@ -171,12 +171,15 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 	return p, nil
 }
 
-func (p *proxy) copyToUpstream() error {
+func (p *proxy) copyToUpstream() (finalErr error) {
 	defer func() {
-		err := p.finalize()
-		close(p.channelEndpoint.C)
-		p.closedCh <- err
-		close(p.closedCh)
+		go func() {
+			err := p.finalize()
+			close(p.channelEndpoint.C)
+			p.closedCh <- err
+			close(p.closedCh)
+		}()
+		finalErr = p.Close()
 	}()
 
 	for {

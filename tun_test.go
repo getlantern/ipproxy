@@ -15,7 +15,8 @@ import (
 )
 
 const (
-	idleTimeout = 1 * time.Second
+	shortIdleTimeout = 1 * time.Second
+	longIdleTimeout  = 1000 * time.Minute
 )
 
 var (
@@ -25,9 +26,69 @@ var (
 // Note - this test has to be run with root permissions to allow setting up the
 // TUN device.
 func TestTCPandUDP(t *testing.T) {
+	doTest(
+		t,
+		shortIdleTimeout,
+		"10.0.0.2", "10.0.0.1",
+		func(p Proxy, uconn net.Conn, b []byte) {
+			assert.Equal(t, "helloudp", string(b))
+		},
+		func(p Proxy, conn net.Conn, b []byte) {
+			assert.Equal(t, "hellotcp", string(b))
+			conn.Close()
+			time.Sleep(50 * time.Millisecond)
+			_, numTCPConns, _ := p.ConnCounts()
+			assert.Zero(t, numTCPConns, "TCP conn should be quickly purged from connection tracking")
+			assert.Zero(t, atomic.LoadInt64(&serverTCPConnections), "Server-side TCP connection should have been closed")
+		},
+		func(p Proxy, dev io.Closer) {
+			time.Sleep(2 * shortIdleTimeout)
+			numTCPDests, _, numUDPConns := p.ConnCounts()
+			assert.Zero(t, numTCPDests, "TCP destinations should be purged after idle timeout")
+			assert.Zero(t, numUDPConns, "UDP conn should be purged after idle timeout")
+		})
+}
+
+// TestCloseCleanup is a lot like TestTCPandUDP but it relies on calling
+// p.Close() for connection cleanup
+func TestCloseCleanup(t *testing.T) {
+	doTest(
+		t,
+		longIdleTimeout,
+		"10.0.0.4", "10.0.0.3",
+		func(p Proxy, uconn net.Conn, b []byte) {
+			assert.Equal(t, "helloudp", string(b))
+		},
+		func(p Proxy, conn net.Conn, b []byte) {
+			assert.Equal(t, "hellotcp", string(b))
+		},
+		func(p Proxy, dev io.Closer) {
+			time.Sleep(2 * shortIdleTimeout)
+			numTCPDests, numTCPConns, numUDPConns := p.ConnCounts()
+			assert.Equal(t, 1, numTCPDests, "TCP destinations should not be purged after idle timeout")
+			assert.Equal(t, 1, numTCPConns, "TCP conns should not be purged after idle timeout")
+			assert.Equal(t, 1, numUDPConns, "UDP conn should not be purged after idle timeout")
+			err := dev.Close()
+			if assert.NoError(t, err) {
+				err = p.Close()
+				if assert.NoError(t, err) {
+					log.Debug("Checking")
+					numTCPDests, numTCPConns, numUDPConns := p.ConnCounts()
+					log.Debug("Got counts")
+					assert.Zero(t, numTCPDests, "TCP destinations should be purged after close")
+					assert.Zero(t, numTCPConns, "TCP conns should be purged after close")
+					assert.Zero(t, numUDPConns, "UDP conn should be purged after close")
+					log.Debug("Done checking")
+				}
+			}
+		})
+}
+
+func doTest(t *testing.T, idleTimeout time.Duration, addr string, gw string, afterUDP func(Proxy, net.Conn, []byte), afterTCP func(Proxy, net.Conn, []byte), finish func(Proxy, io.Closer)) {
+	atomic.StoreInt64(&serverTCPConnections, 0)
 	ip := "127.0.0.1"
 
-	dev, err := tun.OpenTunDevice("tun0", "10.0.0.2", "10.0.0.1", "255.255.255.0")
+	dev, err := tun.OpenTunDevice("tun0", addr, gw, "255.255.255.0")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -64,12 +125,16 @@ func TestTCPandUDP(t *testing.T) {
 
 	// point at TUN device rather than echo server directly
 	_, port, _ := net.SplitHostPort(echoAddr)
-	echoAddr = "10.0.0.1:" + port
+	echoAddr = gw + ":" + port
 
 	b := make([]byte, 8)
 
-	_, connCount, err := fdcount.Matching("TCP")
-	if !assert.NoError(t, err, "unable to get initial socket count") {
+	_, tcpConnCount, err := fdcount.Matching("TCP")
+	if !assert.NoError(t, err, "unable to get initial TCP socket count") {
+		return
+	}
+	_, udpConnCount, err := fdcount.Matching("UDP")
+	if !assert.NoError(t, err, "unable to get initial UDP socket count") {
 		return
 	}
 
@@ -90,7 +155,7 @@ func TestTCPandUDP(t *testing.T) {
 	if !assert.NoError(t, err) {
 		return
 	}
-	assert.Equal(t, "helloudp", string(b))
+	afterUDP(p, uconn, b)
 
 	log.Debugf("TCP dialing echo server at: %v", echoAddr)
 	conn, err := net.DialTimeout("tcp4", echoAddr, 5*time.Second)
@@ -108,19 +173,12 @@ func TestTCPandUDP(t *testing.T) {
 	if !assert.NoError(t, err) {
 		return
 	}
-	assert.Equal(t, "hellotcp", string(b))
-	conn.Close()
-	time.Sleep(50 * time.Millisecond)
-	_, numTCPConns, _ := p.ConnCounts()
-	assert.Zero(t, numTCPConns, "TCP conn should be quickly purged from connection tracking")
-	assert.Zero(t, atomic.LoadInt64(&serverTCPConnections), "Server-side TCP connection should have been closed")
+	afterTCP(p, conn, b)
+	finish(p, dev)
 
-	time.Sleep(2 * idleTimeout)
-	numTCPDests, _, numUDPConns := p.ConnCounts()
-	assert.Zero(t, numTCPDests, "TCP destinations should be purged after idle timeout")
-	assert.Zero(t, numUDPConns, "UDP conn should be purged after idle timeout")
-
-	connCount.AssertDelta(0)
+	close(closeCh)
+	tcpConnCount.AssertDelta(0)
+	udpConnCount.AssertDelta(0)
 }
 
 func tcpEcho(t *testing.T, closeCh <-chan interface{}, ip string) string {
@@ -137,7 +195,6 @@ func tcpEcho(t *testing.T, closeCh <-chan interface{}, ip string) string {
 		for {
 			conn, err := l.Accept()
 			if err != nil {
-				t.Error(err)
 				return
 			}
 			go func() {
@@ -168,7 +225,6 @@ func udpEcho(t *testing.T, closeCh <-chan interface{}, echoAddr string) {
 		for {
 			n, addr, err := conn.ReadFrom(b)
 			if err != nil {
-				t.Error(err)
 				return
 			}
 			log.Debugf("Got UDP packet! Addr: %v", addr)
