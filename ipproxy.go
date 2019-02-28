@@ -104,11 +104,8 @@ type Proxy interface {
 	// Serve starts proxying and blocks until finished
 	Serve() error
 
-	// NumTCPConns returns the current number of TCP connections being tracked
-	NumTCPConns() int
-
-	// NumUDPConns returns the current number of UDP connections being tracked
-	NumUDPConns() int
+	// ConnCounts gets current counts of connections
+	ConnCounts() (numTCPDests int, numTCPConns int, numUDPConns int)
 
 	// Close shuts down the proxy in an orderly fashion and blocks until shutdown
 	// is complete.
@@ -139,6 +136,7 @@ type proxy struct {
 
 func (p *proxy) Serve() error {
 	go p.trackStats()
+	go p.reapTCP()
 	go p.reapUDP()
 	go p.copyFromUpstream()
 	return p.copyToUpstream()

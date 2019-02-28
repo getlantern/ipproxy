@@ -100,7 +100,7 @@ func (p *proxy) reapUDP() {
 	for {
 		time.Sleep(1 * time.Second)
 		p.udpConnTrackMx.Lock()
-		conns := make([]*udpConn, 0)
+		conns := make([]*udpConn, 0, len(p.udpConnTrack))
 		for _, conn := range p.udpConnTrack {
 			conns = append(conns, conn)
 		}

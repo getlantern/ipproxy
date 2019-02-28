@@ -111,11 +111,14 @@ func TestTCPandUDP(t *testing.T) {
 	assert.Equal(t, "hellotcp", string(b))
 	conn.Close()
 	time.Sleep(50 * time.Millisecond)
-	assert.Zero(t, p.NumTCPConns(), "TCP conn should be quickly purged from connection tracking")
+	_, numTCPConns, _ := p.ConnCounts()
+	assert.Zero(t, numTCPConns, "TCP conn should be quickly purged from connection tracking")
 	assert.Zero(t, atomic.LoadInt64(&serverTCPConnections), "Server-side TCP connection should have been closed")
 
 	time.Sleep(2 * idleTimeout)
-	assert.Zero(t, p.NumUDPConns(), "UDP conn should be purged after idle timeout")
+	numTCPDests, _, numUDPConns := p.ConnCounts()
+	assert.Zero(t, numTCPDests, "TCP destinations should be purged after idle timeout")
+	assert.Zero(t, numUDPConns, "UDP conn should be purged after idle timeout")
 
 	connCount.AssertDelta(0)
 }

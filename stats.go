@@ -12,26 +12,30 @@ func (p *proxy) trackStats() {
 		case <-p.closeCh:
 			return
 		case <-ticker.C:
-			log.Debugf("TCP Conns: %v    UDP Conns: %v", p.NumTCPConns(), p.NumUDPConns())
+			numTCPDests, numTCPConns, numUDPConns := p.ConnCounts()
+			log.Debugf("TCP Dests: %v   TCP Conns: %v    UDP Conns: %v", numTCPDests, numTCPConns, numUDPConns)
 			log.Debugf("Accepted Packets: %d    Rejected Packets: %d", p.AcceptedPackets(), p.RejectedPackets())
 		}
 	}
 }
 
-func (p *proxy) NumTCPConns() int {
-	// p.tcpConnTrackMx.Lock()
-	// tcpConns := len(p.tcpConnTrack)
-	// p.tcpConnTrackMx.Unlock()
-	// return tcpConns
-	return 0
-	// TODO: implement
-}
+func (p *proxy) ConnCounts() (numTCPDests int, numTCPConns int, numUDPConns int) {
+	p.tcpConnTrackMx.Lock()
+	dests := make([]*tcpDest, 0, len(p.tcpConnTrack))
+	for _, dest := range p.tcpConnTrack {
+		dests = append(dests, dest)
+	}
+	p.tcpConnTrackMx.Unlock()
+	numTCPDests = len(dests)
+	for _, dest := range dests {
+		numTCPConns += dest.numConns()
+	}
 
-func (p *proxy) NumUDPConns() int {
 	p.udpConnTrackMx.Lock()
-	udpConns := len(p.udpConnTrack)
+	numUDPConns = len(p.udpConnTrack)
 	p.udpConnTrackMx.Unlock()
-	return udpConns
+
+	return
 }
 
 func (p *proxy) acceptedPacket() {
