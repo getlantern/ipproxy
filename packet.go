@@ -54,22 +54,27 @@ func (pkt ipPacket) parseV4() (ipPacket, error) {
 	return pkt, nil
 }
 
-func (pkt ipPacket) ft() fivetuple {
-	return fivetuple{
-		ipProto: pkt.ipProto,
-		srcIP:   pkt.srcAddr.String(),
-		dstIP:   pkt.dstAddr.String(),
-		srcPort: networkByteOrder.Uint16(pkt.payload[0:2]),
-		dstPort: networkByteOrder.Uint16(pkt.payload[2:4]),
+func (pkt ipPacket) ft() fourtuple {
+	return fourtuple{
+		src: addr{ip: pkt.srcAddr.String(), port: networkByteOrder.Uint16(pkt.payload[0:2])},
+		dst: addr{ip: pkt.dstAddr.String(), port: networkByteOrder.Uint16(pkt.payload[2:4])},
 	}
 }
 
-type fivetuple struct {
-	ipProto          uint8
-	srcIP, dstIP     string
-	srcPort, dstPort uint16
+type addr struct {
+	ip   string
+	port uint16
 }
 
-func (ft fivetuple) String() string {
-	return fmt.Sprintf("[%d] %v:%v -> %v:%v", ft.ipProto, ft.srcIP, ft.srcPort, ft.dstIP, ft.dstPort)
+func (a addr) String() string {
+	return fmt.Sprintf("%v:%d", a.ip, a.port)
+}
+
+type fourtuple struct {
+	src addr
+	dst addr
+}
+
+func (ft fourtuple) String() string {
+	return fmt.Sprintf("%v -> %v", ft.src, ft.dst)
 }

@@ -73,7 +73,7 @@ func TestTCPandUDP(t *testing.T) {
 		return
 	}
 
-	log.Debugf("Dialing echo server at: %v", echoAddr)
+	log.Debugf("UDP dialing echo server at: %v", echoAddr)
 	uconn, err := net.Dial("udp", echoAddr)
 	if !assert.NoError(t, err, "Unable to get UDP connection to TUN device") {
 		return
@@ -92,28 +92,27 @@ func TestTCPandUDP(t *testing.T) {
 	}
 	assert.Equal(t, "helloudp", string(b))
 
-	if false {
-		conn, err := net.DialTimeout("tcp", echoAddr, 5*time.Second)
-		if !assert.NoError(t, err) {
-			return
-		}
-		defer conn.Close()
-
-		_, err = conn.Write([]byte("hellotcp"))
-		if !assert.NoError(t, err) {
-			return
-		}
-
-		_, err = io.ReadFull(conn, b)
-		if !assert.NoError(t, err) {
-			return
-		}
-		assert.Equal(t, "hellotcp", string(b))
-		conn.Close()
-		time.Sleep(50 * time.Millisecond)
-		assert.Zero(t, p.NumTCPConns(), "TCP conn should be quickly purged from connection tracking")
-		assert.Zero(t, atomic.LoadInt64(&serverTCPConnections), "Server-side TCP connection should have been closed")
+	log.Debugf("TCP dialing echo server at: %v", echoAddr)
+	conn, err := net.DialTimeout("tcp4", echoAddr, 5*time.Second)
+	if !assert.NoError(t, err) {
+		return
 	}
+	defer conn.Close()
+
+	_, err = conn.Write([]byte("hellotcp"))
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	_, err = io.ReadFull(conn, b)
+	if !assert.NoError(t, err) {
+		return
+	}
+	assert.Equal(t, "hellotcp", string(b))
+	conn.Close()
+	time.Sleep(50 * time.Millisecond)
+	assert.Zero(t, p.NumTCPConns(), "TCP conn should be quickly purged from connection tracking")
+	assert.Zero(t, atomic.LoadInt64(&serverTCPConnections), "Server-side TCP connection should have been closed")
 
 	time.Sleep(2 * idleTimeout)
 	assert.Zero(t, p.NumUDPConns(), "UDP conn should be purged after idle timeout")

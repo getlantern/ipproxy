@@ -13,7 +13,6 @@ import (
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/link/channel"
 	"github.com/google/netstack/tcpip/network/ipv4"
-	"github.com/google/netstack/tcpip/network/ipv6"
 	"github.com/google/netstack/tcpip/stack"
 	"github.com/google/netstack/tcpip/transport/tcp"
 	"github.com/google/netstack/tcpip/transport/udp"
@@ -33,7 +32,7 @@ const (
 	DefaultOutboundBufferDepth = 1
 	DefaultBufferPoolSize      = 100
 	DefaultIdleTimeout         = 65 * time.Second
-	DefaultNICID               = 1
+	DefaultTCPConnectBacklog   = 10
 
 	IPProtocolTCP = 6
 	IPProtocolUDP = 17
@@ -56,9 +55,9 @@ type Opts struct {
 	// automatically closed. The default is 65 seconds.
 	IdleTimeout time.Duration
 
-	// NICID is the internal id for the link-local interface. Usually the default
-	// value is fine.
-	NICID int
+	// TCPConnectBacklog is the allows backlog of TCP connections to a given
+	// upstream port. Defaults to 10.
+	TCPConnectBacklog int
 
 	// DialTCP specifies a function for dialing upstream TCP connections. Defaults
 	// to net.Dialer.DialContext().
@@ -82,8 +81,8 @@ func (opts *Opts) setDefaults() {
 	if opts.IdleTimeout <= 0 {
 		opts.IdleTimeout = DefaultIdleTimeout
 	}
-	if opts.NICID <= 0 {
-		opts.NICID = DefaultNICID
+	if opts.TCPConnectBacklog <= 0 {
+		opts.TCPConnectBacklog = DefaultTCPConnectBacklog
 	}
 	if opts.DialTCP == nil {
 		d := &net.Dialer{}
@@ -130,12 +129,12 @@ type proxy struct {
 	stack           *stack.Stack
 	pool            *bpool.BytePool
 
-	udpConnTrack   map[fivetuple]*udpConn
+	tcpConnTrack   map[uint16]*tcpClient
+	tcpConnTrackMx sync.Mutex
+	udpConnTrack   map[fourtuple]*udpConn
 	udpConnTrackMx sync.Mutex
 
-	closeCh   chan struct{}
-	closedCh  chan error
-	closeOnce sync.Once
+	closeable
 }
 
 func (p *proxy) Serve() error {
@@ -153,7 +152,7 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 	opts.setDefaults()
 
 	linkID, channelEndpoint := channel.New(opts.OutboundBufferDepth, uint32(opts.MTU), "")
-	s := stack.New([]string{ipv4.ProtocolName, ipv6.ProtocolName}, []string{tcp.ProtocolName, udp.ProtocolName}, stack.Options{})
+	s := stack.New([]string{ipv4.ProtocolName}, []string{tcp.ProtocolName, udp.ProtocolName}, stack.Options{})
 
 	p := &proxy{
 		opts:            opts,
@@ -163,9 +162,12 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		channelEndpoint: channelEndpoint,
 		stack:           s,
 		pool:            bpool.NewBytePool(opts.BufferPoolSize, opts.MTU),
-		udpConnTrack:    make(map[fivetuple]*udpConn, 0),
-		closeCh:         make(chan struct{}),
-		closedCh:        make(chan error),
+		tcpConnTrack:    make(map[uint16]*tcpClient, 0),
+		udpConnTrack:    make(map[fourtuple]*udpConn, 0),
+		closeable: closeable{
+			closeCh:  make(chan struct{}),
+			closedCh: make(chan error),
+		},
 	}
 
 	return p, nil
@@ -198,7 +200,7 @@ func (p *proxy) copyToUpstream() error {
 		switch pkt.ipProto {
 		case IPProtocolTCP:
 			p.acceptedPacket()
-			// p.onTCP(pkt)
+			p.onTCP(pkt)
 		case IPProtocolUDP:
 			p.acceptedPacket()
 			p.onUDP(pkt)
@@ -227,14 +229,6 @@ func (p *proxy) copyFromUpstream() {
 
 func (p *proxy) nextNICID() tcpip.NICID {
 	return tcpip.NICID(atomic.AddUint32(&p.currentNICID, 1))
-}
-
-func (p *proxy) Close() (err error) {
-	p.closeOnce.Do(func() {
-		close(p.closeCh)
-		err = <-p.closedCh
-	})
-	return
 }
 
 func (p *proxy) finalize() error {

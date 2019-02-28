@@ -6,15 +6,12 @@ import (
 	"io"
 	"net"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/buffer"
 	"github.com/google/netstack/tcpip/network/ipv4"
 	"github.com/google/netstack/tcpip/transport/udp"
-	"github.com/google/netstack/waiter"
 
 	"github.com/getlantern/errors"
 )
@@ -39,14 +36,14 @@ func (p *proxy) onUDP(pkt ipPacket) {
 	p.channelEndpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
 }
 
-func (p *proxy) startUDPConn(ft fivetuple) (*udpConn, error) {
-	upstreamAddr := fmt.Sprintf("%v:%d", ft.dstIP, ft.dstPort)
+func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
+	upstreamAddr := fmt.Sprintf("%v:%d", ft.dst.ip, ft.dst.port)
 	upstream, err := p.opts.DialUDP(context.Background(), "udp", upstreamAddr)
 	if err != nil {
 		return nil, errors.New("Unable to dial upstream %v: %v", upstreamAddr, err)
 	}
 
-	upstreamIPAddr := tcpip.Address(net.ParseIP(ft.dstIP).To4())
+	upstreamIPAddr := tcpip.Address(net.ParseIP(ft.dst.ip).To4())
 	nicID := p.nextNICID()
 	if err := p.stack.CreateNIC(nicID, p.linkID); err != nil {
 		return nil, errors.New("Unable to create NIC: %v", err)
@@ -55,7 +52,7 @@ func (p *proxy) startUDPConn(ft fivetuple) (*udpConn, error) {
 		return nil, errors.New("Unable to assign NIC address: %v", err)
 	}
 
-	downstreamIPAddr := tcpip.Address(net.ParseIP(ft.srcIP).To4())
+	downstreamIPAddr := tcpip.Address(net.ParseIP(ft.src.ip).To4())
 
 	// Add default route that routes all IPv4 packets for the given upstream address
 	// to our NIC and routes packets to the downstreamIPAddr as well,
@@ -75,30 +72,15 @@ func (p *proxy) startUDPConn(ft fivetuple) (*udpConn, error) {
 	})
 
 	conn := &udpConn{
-		p:              p,
-		downstreamAddr: &tcpip.FullAddress{0, downstreamIPAddr, ft.srcPort},
+		baseConn:       newBaseConn(p),
+		downstreamAddr: &tcpip.FullAddress{0, downstreamIPAddr, ft.src.port},
 		upstream:       upstream,
 		ft:             ft,
-		closeCh:        make(chan struct{}),
-		closedCh:       make(chan error),
 	}
 	conn.markActive()
 
-	var epErr *tcpip.Error
-	conn.ep, epErr = p.stack.NewEndpoint(udp.ProtocolNumber, p.proto, &conn.wq)
-	if epErr != nil {
-		return nil, errors.New("Unable to create UDP endpoint: %v", epErr)
-	}
-
-	// Wait for connections to appear.
-	_waitEntry, _notifyCh := waiter.NewChannelEntry(nil)
-	conn.waitEntry = &_waitEntry
-	conn.notifyCh = _notifyCh
-	conn.wq.EventRegister(conn.waitEntry, waiter.EventIn)
-
-	if err := conn.ep.Bind(tcpip.FullAddress{nicID, upstreamIPAddr, ft.dstPort}, nil); err != nil {
-		conn.finalize()
-		return nil, errors.New("UDP bind failed: %v", err)
+	if err := conn.init(udp.ProtocolNumber, tcpip.FullAddress{nicID, upstreamIPAddr, ft.dst.port}); err != nil {
+		return nil, errors.New("Unable to initialize UDP connection: %v", err)
 	}
 
 	go conn.copyToUpstream()
@@ -107,18 +89,10 @@ func (p *proxy) startUDPConn(ft fivetuple) (*udpConn, error) {
 }
 
 type udpConn struct {
-	lastActive     int64
-	p              *proxy
+	baseConn
 	downstreamAddr *tcpip.FullAddress
 	upstream       io.ReadWriteCloser
-	ft             fivetuple
-	ep             tcpip.Endpoint
-	wq             waiter.Queue
-	waitEntry      *waiter.Entry
-	notifyCh       chan struct{}
-	closeCh        chan struct{}
-	closedCh       chan error
-	closeOnce      sync.Once
+	ft             fourtuple
 }
 
 func (conn *udpConn) copyToUpstream() {
@@ -132,7 +106,7 @@ func (conn *udpConn) copyToUpstream() {
 		case <-conn.closeCh:
 			return
 		case <-conn.notifyCh:
-			addr := &tcpip.FullAddress{0, "", conn.ft.dstPort}
+			addr := &tcpip.FullAddress{0, "", conn.ft.dst.port}
 			buf, _, readErr := conn.ep.Read(addr)
 			if readErr != nil {
 				log.Errorf("Unexpected error reading from downstream: %v", readErr)
@@ -173,31 +147,10 @@ func (conn *udpConn) copyFromUpstream() {
 	}
 }
 
-func (conn *udpConn) markActive() {
-	atomic.StoreInt64(&conn.lastActive, time.Now().UnixNano())
-}
-
-func (conn *udpConn) timeSinceLastActive() time.Duration {
-	return time.Duration(time.Now().UnixNano() - atomic.LoadInt64(&conn.lastActive))
-}
-
-// Close stops the loop that writes to upstream, which eventually causes
-// finalize to run.
-func (conn *udpConn) Close() (err error) {
-	conn.closeOnce.Do(func() {
-		close(conn.closeCh)
-		err = <-conn.closedCh
-	})
-	return
-}
-
 // finalize does the actual cleaning up of the connection. It runs at the end
 // of the loop that writes to upstream.
 func (conn *udpConn) finalize() (err error) {
-	conn.wq.EventUnregister(conn.waitEntry)
-	if conn.ep != nil {
-		conn.ep.Close()
-	}
+	conn.baseConn.finalize()
 	if conn.upstream != nil {
 		err = conn.upstream.Close()
 	}
