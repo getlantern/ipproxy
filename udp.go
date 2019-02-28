@@ -112,8 +112,7 @@ func (conn *udpConn) copyToUpstream() {
 				log.Errorf("Unexpected error reading from downstream: %v", readErr)
 				continue
 			}
-			_, writeErr := conn.upstream.Write(buf)
-			if writeErr != nil {
+			if _, writeErr := conn.upstream.Write(buf); writeErr != nil {
 				log.Errorf("Unexpected error writing to upstream: %v", writeErr)
 				return
 			}
@@ -149,15 +148,18 @@ func (conn *udpConn) copyFromUpstream() {
 
 // finalize does the actual cleaning up of the connection. It runs at the end
 // of the loop that writes to upstream.
-func (conn *udpConn) finalize() (err error) {
-	conn.baseConn.finalize()
+func (conn *udpConn) finalize() error {
+	err := conn.baseConn.finalize()
 	if conn.upstream != nil {
-		err = conn.upstream.Close()
+		_err := conn.upstream.Close()
+		if err == nil {
+			err = _err
+		}
 	}
 	conn.p.udpConnTrackMx.Lock()
 	delete(conn.p.udpConnTrack, conn.ft)
 	conn.p.udpConnTrackMx.Unlock()
-	return
+	return err
 }
 
 // reapUDP reaps idled UDP connections. We do this on a single goroutine to

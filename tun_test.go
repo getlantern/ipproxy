@@ -109,7 +109,9 @@ func TestTCPandUDP(t *testing.T) {
 		return
 	}
 	assert.Equal(t, "hellotcp", string(b))
+	log.Debug("TCP good!")
 	conn.Close()
+	log.Debug("TCP closed!")
 	time.Sleep(50 * time.Millisecond)
 	assert.Zero(t, p.NumTCPConns(), "TCP conn should be quickly purged from connection tracking")
 	assert.Zero(t, atomic.LoadInt64(&serverTCPConnections), "Server-side TCP connection should have been closed")
@@ -164,7 +166,7 @@ func udpEcho(t *testing.T, closeCh <-chan interface{}, echoAddr string) {
 				t.Error(err)
 				return
 			}
-			log.Debugf("Got packet! Addr: %v", addr)
+			log.Debugf("Got UDP packet! Addr: %v", addr)
 			conn.WriteTo(b[:n], addr)
 		}
 	}()

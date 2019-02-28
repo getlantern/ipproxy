@@ -14,7 +14,7 @@ type baseConn struct {
 	lastActive int64
 	p          *proxy
 	ep         tcpip.Endpoint
-	wq         waiter.Queue
+	wq         *waiter.Queue
 	waitEntry  *waiter.Entry
 	notifyCh   chan struct{}
 
@@ -22,8 +22,17 @@ type baseConn struct {
 }
 
 func newBaseConn(p *proxy) baseConn {
+	return newBaseConnWithQueue(p, &waiter.Queue{})
+}
+
+func newBaseConnWithQueue(p *proxy, wq *waiter.Queue) baseConn {
+	waitEntry, notifyCh := waiter.NewChannelEntry(nil)
+	wq.EventRegister(&waitEntry, waiter.EventIn)
 	return baseConn{
-		p: p,
+		p:         p,
+		wq:        wq,
+		waitEntry: &waitEntry,
+		notifyCh:  notifyCh,
 		closeable: closeable{
 			closeCh:  make(chan struct{}),
 			closedCh: make(chan error),
@@ -33,15 +42,9 @@ func newBaseConn(p *proxy) baseConn {
 
 func (conn *baseConn) init(transportProtocol tcpip.TransportProtocolNumber, bindAddr tcpip.FullAddress) error {
 	var epErr *tcpip.Error
-	if conn.ep, epErr = conn.p.stack.NewEndpoint(transportProtocol, conn.p.proto, &conn.wq); epErr != nil {
+	if conn.ep, epErr = conn.p.stack.NewEndpoint(transportProtocol, conn.p.proto, conn.wq); epErr != nil {
 		return errors.New("Unable to create endpoint: %v", epErr)
 	}
-
-	// Wait for connections to appear.
-	_waitEntry, _notifyCh := waiter.NewChannelEntry(nil)
-	conn.waitEntry = &_waitEntry
-	conn.notifyCh = _notifyCh
-	conn.wq.EventRegister(conn.waitEntry, waiter.EventIn)
 
 	if err := conn.ep.Bind(bindAddr, nil); err != nil {
 		conn.finalize()
@@ -59,9 +62,10 @@ func (conn *baseConn) timeSinceLastActive() time.Duration {
 	return time.Duration(time.Now().UnixNano() - atomic.LoadInt64(&conn.lastActive))
 }
 
-func (conn *baseConn) finalize() {
+func (conn *baseConn) finalize() error {
 	conn.wq.EventUnregister(conn.waitEntry)
 	if conn.ep != nil {
 		conn.ep.Close()
 	}
+	return nil
 }
