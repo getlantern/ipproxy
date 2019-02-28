@@ -129,7 +129,7 @@ type proxy struct {
 	stack           *stack.Stack
 	pool            *bpool.BytePool
 
-	tcpConnTrack   map[uint16]*tcpClient
+	tcpConnTrack   map[addr]*tcpDest
 	tcpConnTrackMx sync.Mutex
 	udpConnTrack   map[fourtuple]*udpConn
 	udpConnTrackMx sync.Mutex
@@ -162,7 +162,7 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		channelEndpoint: channelEndpoint,
 		stack:           s,
 		pool:            bpool.NewBytePool(opts.BufferPoolSize, opts.MTU),
-		tcpConnTrack:    make(map[uint16]*tcpClient, 0),
+		tcpConnTrack:    make(map[addr]*tcpDest, 0),
 		udpConnTrack:    make(map[fourtuple]*udpConn, 0),
 		closeable: closeable{
 			closeCh:  make(chan struct{}),
