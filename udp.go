@@ -3,9 +3,7 @@ package ipproxy
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
-	"strings"
 	"time"
 
 	"github.com/google/netstack/tcpip"
@@ -72,10 +70,13 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 	})
 
 	conn := &udpConn{
-		baseConn:       newBaseConn(p),
-		downstreamAddr: &tcpip.FullAddress{0, downstreamIPAddr, ft.src.port},
-		upstream:       upstream,
-		ft:             ft,
+		baseConn: newBaseConn(p, upstream, func() error {
+			p.udpConnTrackMx.Lock()
+			delete(p.udpConnTrack, ft)
+			p.udpConnTrackMx.Unlock()
+			return nil
+		}),
+		ft: ft,
 	}
 	conn.markActive()
 
@@ -83,83 +84,14 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 		return nil, errors.New("Unable to initialize UDP connection: %v", err)
 	}
 
-	go conn.copyToUpstream()
-	go conn.copyFromUpstream()
+	go conn.copyToUpstream(&tcpip.FullAddress{0, "", ft.dst.port})
+	go conn.copyFromUpstream(tcpip.WriteOptions{To: &tcpip.FullAddress{0, downstreamIPAddr, ft.src.port}})
 	return conn, nil
 }
 
 type udpConn struct {
 	baseConn
-	downstreamAddr *tcpip.FullAddress
-	upstream       io.ReadWriteCloser
-	ft             fourtuple
-}
-
-func (conn *udpConn) copyToUpstream() {
-	defer func() {
-		conn.closedCh <- conn.finalize()
-		close(conn.closedCh)
-	}()
-
-	for {
-		select {
-		case <-conn.closeCh:
-			return
-		case <-conn.notifyCh:
-			addr := &tcpip.FullAddress{0, "", conn.ft.dst.port}
-			buf, _, readErr := conn.ep.Read(addr)
-			if readErr != nil {
-				log.Errorf("Unexpected error reading from downstream: %v", readErr)
-				continue
-			}
-			if _, writeErr := conn.upstream.Write(buf); writeErr != nil {
-				log.Errorf("Unexpected error writing to upstream: %v", writeErr)
-				return
-			}
-			conn.markActive()
-		}
-	}
-}
-
-func (conn *udpConn) copyFromUpstream() {
-	defer conn.Close()
-	b := conn.p.pool.Get()
-	for {
-		n, readErr := conn.upstream.Read(b)
-		if readErr != nil {
-			if neterr, ok := readErr.(net.Error); ok && neterr.Temporary() {
-				continue
-			}
-			if readErr != io.EOF && !strings.Contains(readErr.Error(), "use of closed network connection") {
-				log.Errorf("Unexpected error reading from upstream: %v", readErr)
-			}
-			return
-		}
-		_, _, writeErr := conn.ep.Write(tcpip.SlicePayload(b[:n]), tcpip.WriteOptions{
-			To: conn.downstreamAddr,
-		})
-		if writeErr != nil {
-			log.Errorf("Unexpected error writing to downstream: %v", writeErr)
-			return
-		}
-		conn.markActive()
-	}
-}
-
-// finalize does the actual cleaning up of the connection. It runs at the end
-// of the loop that writes to upstream.
-func (conn *udpConn) finalize() error {
-	err := conn.baseConn.finalize()
-	if conn.upstream != nil {
-		_err := conn.upstream.Close()
-		if err == nil {
-			err = _err
-		}
-	}
-	conn.p.udpConnTrackMx.Lock()
-	delete(conn.p.udpConnTrack, conn.ft)
-	conn.p.udpConnTrackMx.Unlock()
-	return err
+	ft fourtuple
 }
 
 // reapUDP reaps idled UDP connections. We do this on a single goroutine to

@@ -2,9 +2,7 @@ package ipproxy
 
 import (
 	"context"
-	"io"
 	"net"
-	"strings"
 
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/buffer"
@@ -45,7 +43,7 @@ func (p *proxy) startTCPDest(dstAddr addr) (*tcpDest, error) {
 	}
 
 	dest := &tcpDest{
-		baseConn: newBaseConn(p),
+		baseConn: newBaseConn(p, nil, nil),
 		addr:     dstAddr.String(),
 	}
 	dest.markActive()
@@ -103,85 +101,14 @@ func (dest *tcpDest) accept() {
 		}
 
 		tcpConn := &tcpConn{
-			baseConn: newBaseConnWithQueue(dest.p, wq),
-			upstream: upstream,
+			baseConn: newBaseConnWithQueue(dest.p, upstream, wq, nil),
 		}
 		tcpConn.ep = acceptedEp
-		go tcpConn.copyToUpstream()
-		go tcpConn.copyFromUpstream()
+		go tcpConn.copyToUpstream(nil)
+		go tcpConn.copyFromUpstream(tcpip.WriteOptions{})
 	}
 }
 
 type tcpConn struct {
 	baseConn
-	upstream io.ReadWriteCloser
-}
-
-func (conn *tcpConn) copyToUpstream() {
-	defer func() {
-		conn.closedCh <- conn.finalize()
-		close(conn.closedCh)
-	}()
-
-	for {
-		buf, _, readErr := conn.ep.Read(nil)
-		if readErr != nil {
-			if readErr == tcpip.ErrWouldBlock {
-				select {
-				case <-conn.closeCh:
-					return
-				case <-conn.notifyCh:
-					continue
-				}
-			}
-			if !strings.Contains(readErr.String(), "endpoint is closed for receive") {
-				log.Errorf("Unexpected error reading from downstream: %v", readErr)
-			}
-			return
-		}
-		if _, writeErr := conn.upstream.Write(buf); writeErr != nil {
-			log.Errorf("Unexpected error writing to upstream: %v", writeErr)
-			return
-		}
-		conn.markActive()
-	}
-}
-
-func (conn *tcpConn) copyFromUpstream() {
-	defer conn.Close()
-
-	b := conn.p.pool.Get()
-	for {
-		n, readErr := conn.upstream.Read(b)
-		if readErr != nil {
-			if neterr, ok := readErr.(net.Error); ok && neterr.Temporary() {
-				continue
-			}
-			if readErr != io.EOF && !strings.Contains(readErr.Error(), "use of closed network connection") {
-				log.Errorf("Unexpected error reading from upstream: %v", readErr)
-			}
-			return
-		}
-
-		_, _, writeErr := conn.ep.Write(tcpip.SlicePayload(b[:n]), tcpip.WriteOptions{})
-		if writeErr != nil {
-			log.Errorf("Unexpected error writing to downstream: %v", writeErr)
-			return
-		}
-		conn.markActive()
-	}
-}
-
-func (conn *tcpConn) finalize() error {
-	err := conn.baseConn.finalize()
-	if conn.upstream != nil {
-		_err := conn.upstream.Close()
-		if err == nil {
-			err = _err
-		}
-	}
-	// conn.p.udpConnTrackMx.Lock()
-	// delete(conn.p.udpConnTrack, conn.ft)
-	// conn.p.udpConnTrackMx.Unlock()
-	return err
 }
