@@ -30,27 +30,22 @@ func (p *proxy) onTCP(pkt ipPacket) {
 		p.tcpOriginsMx.Unlock()
 	}
 
-	p.channelEndpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
+	o.channelEndpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
 }
 
 func (p *proxy) createTCPOrigin(dstAddr addr) (*origin, error) {
-	nicID := p.nextNICID()
-	if err := p.stack.CreateNIC(nicID, p.linkID); err != nil {
-		return nil, errors.New("Unable to create TCP NIC: %v", err)
-	}
-	ipAddr := tcpip.Address(net.ParseIP(dstAddr.ip).To4())
-	if err := p.stack.AddAddress(nicID, p.proto, ipAddr); err != nil {
-		return nil, errors.New("Unable to add IP addr for TCP origin: %v", err)
-	}
-
-	o := newOrigin(p, dstAddr.String(), func() error {
+	o := newOrigin(p, dstAddr, func() error {
 		p.removeTCPOrigin(dstAddr)
 		return nil
 	})
 	o.markActive()
 
-	if err := o.init(tcp.ProtocolNumber, tcpip.FullAddress{nicID, ipAddr, dstAddr.port}); err != nil {
+	upstreamIPAddr := tcpip.Address(net.ParseIP(dstAddr.ip).To4())
+	if err := o.init(tcp.ProtocolNumber, upstreamIPAddr, tcpip.FullAddress{nicID, upstreamIPAddr, dstAddr.port}); err != nil {
 		return nil, errors.New("Unable to initialize TCP origin: %v", err)
+	}
+	if pErr := o.stack.SetPromiscuousMode(nicID, true); pErr != nil {
+		return nil, errors.New("Unable to set NIC to promiscuous mode: %v", pErr)
 	}
 
 	if err := o.ep.Listen(p.opts.TCPConnectBacklog); err != nil {
@@ -90,7 +85,7 @@ func acceptTCP(o *origin) {
 		}
 
 		downstreamAddr, _ := acceptedEp.GetRemoteAddress()
-		tcpConn := newBaseConnWithQueue(o.p, upstream, wq, func() error {
+		tcpConn := newBaseConn(o.p, upstream, wq, func() error {
 			o.removeClient(downstreamAddr)
 			return nil
 		})

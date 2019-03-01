@@ -9,9 +9,18 @@ import (
 	"time"
 
 	"github.com/google/netstack/tcpip"
+	"github.com/google/netstack/tcpip/link/channel"
+	"github.com/google/netstack/tcpip/network/ipv4"
+	"github.com/google/netstack/tcpip/stack"
+	"github.com/google/netstack/tcpip/transport/tcp"
+	"github.com/google/netstack/tcpip/transport/udp"
 	"github.com/google/netstack/waiter"
 
 	"github.com/getlantern/errors"
+)
+
+const (
+	nicID = 1
 )
 
 type baseConn struct {
@@ -27,11 +36,7 @@ type baseConn struct {
 	closeable
 }
 
-func newBaseConn(p *proxy, upstream io.ReadWriteCloser, finalizer func() error) baseConn {
-	return newBaseConnWithQueue(p, upstream, &waiter.Queue{}, finalizer)
-}
-
-func newBaseConnWithQueue(p *proxy, upstream io.ReadWriteCloser, wq *waiter.Queue, finalizer func() error) baseConn {
+func newBaseConn(p *proxy, upstream io.ReadWriteCloser, wq *waiter.Queue, finalizer func() error) baseConn {
 	if finalizer == nil {
 		finalizer = func() error { return nil }
 	}
@@ -51,20 +56,6 @@ func newBaseConnWithQueue(p *proxy, upstream io.ReadWriteCloser, wq *waiter.Queu
 			closedCh: make(chan error),
 		},
 	}
-}
-
-func (conn *baseConn) init(transportProtocol tcpip.TransportProtocolNumber, bindAddr tcpip.FullAddress) error {
-	var epErr *tcpip.Error
-	if conn.ep, epErr = conn.p.stack.NewEndpoint(transportProtocol, conn.p.proto, conn.wq); epErr != nil {
-		return errors.New("Unable to create endpoint: %v", epErr)
-	}
-
-	if err := conn.ep.Bind(bindAddr, nil); err != nil {
-		conn.finalize()
-		return errors.New("Bind failed: %v", err)
-	}
-
-	return nil
 }
 
 func (conn *baseConn) copyToUpstream(readAddr *tcpip.FullAddress) {
@@ -147,19 +138,74 @@ func (conn *baseConn) finalize() error {
 	return err
 }
 
-func newOrigin(p *proxy, addr string, finalizer func() error) *origin {
-	return &origin{
-		baseConn: newBaseConnWithQueue(p, nil, &waiter.Queue{}, finalizer),
-		addr:     addr,
-		clients:  make(map[tcpip.FullAddress]*baseConn),
+func newOrigin(p *proxy, addr addr, finalizer func() error) *origin {
+	linkID, channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
+	s := stack.New([]string{ipv4.ProtocolName}, []string{tcp.ProtocolName, udp.ProtocolName}, stack.Options{})
+
+	myFinalizer := func() error {
+		close(channelEndpoint.C)
+		return nil
 	}
+
+	finalFinalizer := myFinalizer
+	if finalizer != nil {
+		finalFinalizer = func() error {
+			err := finalizer()
+			_err := myFinalizer()
+			if err == nil {
+				err = _err
+			}
+			return err
+		}
+	}
+
+	o := &origin{
+		baseConn:        newBaseConn(p, nil, &waiter.Queue{}, finalFinalizer),
+		addr:            addr.String(),
+		stack:           s,
+		linkID:          linkID,
+		channelEndpoint: channelEndpoint,
+		clients:         make(map[tcpip.FullAddress]*baseConn),
+	}
+	go o.copyToDownstream()
+	return o
 }
 
 type origin struct {
 	baseConn
-	addr      string
-	clients   map[tcpip.FullAddress]*baseConn
-	clientsMx sync.Mutex
+	addr            string
+	stack           *stack.Stack
+	linkID          tcpip.LinkEndpointID
+	channelEndpoint *channel.Endpoint
+	clients         map[tcpip.FullAddress]*baseConn
+	clientsMx       sync.Mutex
+}
+
+func (o *origin) copyToDownstream() {
+	for pktInfo := range o.channelEndpoint.C {
+		o.p.toDownstream <- pktInfo
+	}
+}
+
+func (o *origin) init(transportProtocol tcpip.TransportProtocolNumber, ipAddr tcpip.Address, bindAddr tcpip.FullAddress) error {
+	if err := o.stack.CreateNIC(nicID, o.linkID); err != nil {
+		return errors.New("Unable to create TCP NIC: %v", err)
+	}
+	if aErr := o.stack.AddAddress(nicID, o.p.proto, ipAddr); aErr != nil {
+		return errors.New("Unable to assign NIC IP address: %v", aErr)
+	}
+
+	var epErr *tcpip.Error
+	if o.ep, epErr = o.stack.NewEndpoint(transportProtocol, o.p.proto, o.wq); epErr != nil {
+		return errors.New("Unable to create endpoint: %v", epErr)
+	}
+
+	if err := o.ep.Bind(bindAddr, nil); err != nil {
+		o.finalize()
+		return errors.New("Bind failed: %v", err)
+	}
+
+	return nil
 }
 
 func (o *origin) addClient(addr tcpip.FullAddress, client *baseConn) {

@@ -7,15 +7,11 @@ import (
 	"io"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/link/channel"
 	"github.com/google/netstack/tcpip/network/ipv4"
-	"github.com/google/netstack/tcpip/stack"
-	"github.com/google/netstack/tcpip/transport/tcp"
-	"github.com/google/netstack/tcpip/transport/udp"
 
 	"github.com/oxtoacart/bpool"
 
@@ -124,20 +120,17 @@ type proxy struct {
 	acceptedPackets int64
 	rejectedPackets int64
 
-	currentNICID uint32
-
-	opts            *Opts
-	proto           tcpip.NetworkProtocolNumber
-	downstream      io.ReadWriter
-	linkID          tcpip.LinkEndpointID
-	channelEndpoint *channel.Endpoint
-	stack           *stack.Stack
-	pool            *bpool.BytePool
+	opts       *Opts
+	proto      tcpip.NetworkProtocolNumber
+	downstream io.ReadWriter
+	pool       *bpool.BytePool
 
 	tcpOrigins     map[addr]*origin
 	tcpOriginsMx   sync.Mutex
 	udpConnTrack   map[fourtuple]*udpConn
 	udpConnTrackMx sync.Mutex
+
+	toDownstream chan channel.PacketInfo
 
 	closeable
 }
@@ -157,19 +150,14 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 	}
 	opts.setDefaults()
 
-	linkID, channelEndpoint := channel.New(opts.OutboundBufferDepth, uint32(opts.MTU), "")
-	s := stack.New([]string{ipv4.ProtocolName}, []string{tcp.ProtocolName, udp.ProtocolName}, stack.Options{})
-
 	p := &proxy{
-		opts:            opts,
-		proto:           ipv4.ProtocolNumber,
-		downstream:      downstream,
-		linkID:          linkID,
-		channelEndpoint: channelEndpoint,
-		stack:           s,
-		pool:            bpool.NewBytePool(opts.BufferPoolSize, opts.MTU),
-		tcpOrigins:      make(map[addr]*origin, 0),
-		udpConnTrack:    make(map[fourtuple]*udpConn, 0),
+		opts:         opts,
+		proto:        ipv4.ProtocolNumber,
+		downstream:   downstream,
+		pool:         bpool.NewBytePool(opts.BufferPoolSize, opts.MTU),
+		tcpOrigins:   make(map[addr]*origin, 0),
+		udpConnTrack: make(map[fourtuple]*udpConn, 0),
+		toDownstream: make(chan channel.PacketInfo),
 		closeable: closeable{
 			closeCh:  make(chan struct{}),
 			closedCh: make(chan error),
@@ -183,7 +171,6 @@ func (p *proxy) copyToUpstream() (finalErr error) {
 	defer func() {
 		go func() {
 			err := p.finalize()
-			close(p.channelEndpoint.C)
 			p.closedCh <- err
 			close(p.closedCh)
 		}()
@@ -222,22 +209,23 @@ func (p *proxy) copyToUpstream() (finalErr error) {
 }
 
 func (p *proxy) copyFromUpstream() {
-	for pktInfo := range p.channelEndpoint.C {
-		pkt := p.pool.Get()[:0]
-		pkt = append(pkt, pktInfo.Header...)
-		pkt = append(pkt, pktInfo.Payload...)
-		_, err := p.downstream.Write(pkt)
-		if err != nil {
-			log.Errorf("Unexpected error writing to downstream: %v", err)
+	for {
+		select {
+		case <-p.closedCh:
 			return
+		case pktInfo := <-p.toDownstream:
+			pkt := p.pool.Get()[:0]
+			pkt = append(pkt, pktInfo.Header...)
+			pkt = append(pkt, pktInfo.Payload...)
+			_, err := p.downstream.Write(pkt)
+			if err != nil {
+				log.Errorf("Unexpected error writing to downstream: %v", err)
+				return
+			}
+			p.pool.Put(pkt)
+			p.pool.Put(pktInfo.Payload)
 		}
-		p.pool.Put(pkt)
-		p.pool.Put(pktInfo.Payload)
 	}
-}
-
-func (p *proxy) nextNICID() tcpip.NICID {
-	return tcpip.NICID(atomic.AddUint32(&p.currentNICID, 1))
 }
 
 func (p *proxy) finalize() error {

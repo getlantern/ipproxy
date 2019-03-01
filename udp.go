@@ -31,7 +31,7 @@ func (p *proxy) onUDP(pkt ipPacket) {
 		p.udpConnTrackMx.Unlock()
 	}
 
-	p.channelEndpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
+	conn.channelEndpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
 }
 
 func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
@@ -42,19 +42,26 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 	}
 
 	upstreamIPAddr := tcpip.Address(net.ParseIP(ft.dst.ip).To4())
-	nicID := p.nextNICID()
-	if err := p.stack.CreateNIC(nicID, p.linkID); err != nil {
-		return nil, errors.New("Unable to create NIC: %v", err)
-	}
-	if err := p.stack.AddAddress(nicID, p.proto, upstreamIPAddr); err != nil {
-		return nil, errors.New("Unable to assign NIC address: %v", err)
-	}
-
 	downstreamIPAddr := tcpip.Address(net.ParseIP(ft.src.ip).To4())
 
-	// Add default route that routes all IPv4 packets for the given upstream address
+	conn := &udpConn{
+		origin: *newOrigin(p, ft.dst, func() error {
+			p.udpConnTrackMx.Lock()
+			delete(p.udpConnTrack, ft)
+			p.udpConnTrackMx.Unlock()
+			return nil
+		}),
+		ft: ft,
+	}
+	conn.upstream = upstream
+	conn.markActive()
+
+	if err := conn.init(udp.ProtocolNumber, upstreamIPAddr, tcpip.FullAddress{nicID, "", ft.dst.port}); err != nil {
+		return nil, errors.New("Unable to initialize UDP connection for %v: %v", ft, err)
+	}
+
 	// to our NIC and routes packets to the downstreamIPAddr as well,
-	p.stack.SetRouteTable([]tcpip.Route{
+	conn.stack.SetRouteTable([]tcpip.Route{
 		{
 			Destination: upstreamIPAddr,
 			Mask:        tcpip.AddressMask(upstreamIPAddr),
@@ -69,28 +76,13 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 		},
 	})
 
-	conn := &udpConn{
-		baseConn: newBaseConn(p, upstream, func() error {
-			p.udpConnTrackMx.Lock()
-			delete(p.udpConnTrack, ft)
-			p.udpConnTrackMx.Unlock()
-			return nil
-		}),
-		ft: ft,
-	}
-	conn.markActive()
-
-	if err := conn.init(udp.ProtocolNumber, tcpip.FullAddress{nicID, upstreamIPAddr, ft.dst.port}); err != nil {
-		return nil, errors.New("Unable to initialize UDP connection for %v: %v", ft, err)
-	}
-
 	go conn.copyToUpstream(&tcpip.FullAddress{0, "", ft.dst.port})
 	go conn.copyFromUpstream(tcpip.WriteOptions{To: &tcpip.FullAddress{0, downstreamIPAddr, ft.src.port}})
 	return conn, nil
 }
 
 type udpConn struct {
-	baseConn
+	origin
 	ft fourtuple
 }
 
