@@ -38,15 +38,15 @@ func TestTCPandUDP(t *testing.T) {
 			assert.Equal(t, "hellotcp", string(b))
 			conn.Close()
 			time.Sleep(50 * time.Millisecond)
-			_, numTCPConns, _ := p.ConnCounts()
-			assert.Zero(t, numTCPConns, "TCP conn should be quickly purged from connection tracking")
+			_, numTCPOrigins, _ := p.ConnCounts()
+			assert.Zero(t, numTCPOrigins, "TCP client should be quickly purged from connection tracking")
 			assert.Zero(t, atomic.LoadInt64(&serverTCPConnections), "Server-side TCP connection should have been closed")
 		},
 		func(p Proxy, dev io.Closer) {
 			time.Sleep(2 * shortIdleTimeout)
-			numTCPDests, _, numUDPConns := p.ConnCounts()
-			assert.Zero(t, numTCPDests, "TCP destinations should be purged after idle timeout")
-			assert.Zero(t, numUDPConns, "UDP conn should be purged after idle timeout")
+			numTCPOrigins, _, numUDPClients := p.ConnCounts()
+			assert.Zero(t, numTCPOrigins, "TCP origin should be purged after idle timeout")
+			assert.Zero(t, numUDPClients, "UDP client should be purged after idle timeout")
 		})
 }
 
@@ -66,20 +66,20 @@ func TestCloseCleanup(t *testing.T) {
 		},
 		func(p Proxy, dev io.Closer) {
 			time.Sleep(2 * shortIdleTimeout)
-			numTCPDests, numTCPConns, numUDPConns := p.ConnCounts()
-			assert.Equal(t, 1, numTCPDests, "TCP destinations should not be purged after idle timeout")
-			assert.Equal(t, 1, numTCPConns, "TCP conns should not be purged after idle timeout")
-			assert.Equal(t, 1, numUDPConns, "UDP conn should not be purged after idle timeout")
+			numTCPOrigins, numTCPClients, numUDPClients := p.ConnCounts()
+			assert.Equal(t, 1, numTCPOrigins, "TCP origin should not be purged before idle timeout")
+			assert.Equal(t, 1, numTCPClients, "TCP client should not be purged before idle timeout")
+			assert.Equal(t, 1, numUDPClients, "UDP client should not be purged before idle timeout")
 			err := dev.Close()
 			if assert.NoError(t, err) {
 				err = p.Close()
 				if assert.NoError(t, err) {
 					log.Debug("Checking")
-					numTCPDests, numTCPConns, numUDPConns := p.ConnCounts()
+					numTCPOrigins, numTCPClients, numUDPClients := p.ConnCounts()
 					log.Debug("Got counts")
-					assert.Zero(t, numTCPDests, "TCP destinations should be purged after close")
-					assert.Zero(t, numTCPConns, "TCP conns should be purged after close")
-					assert.Zero(t, numUDPConns, "UDP conn should be purged after close")
+					assert.Zero(t, numTCPOrigins, "TCP origin should be purged after close")
+					assert.Zero(t, numTCPClients, "TCP client should be purged after close")
+					assert.Zero(t, numUDPClients, "UDP client should be purged after close")
 					log.Debug("Done checking")
 				}
 			}

@@ -15,67 +15,67 @@ import (
 
 func (p *proxy) onTCP(pkt ipPacket) {
 	dstAddr := pkt.ft().dst
-	p.tcpConnTrackMx.Lock()
-	dest := p.tcpConnTrack[dstAddr]
-	p.tcpConnTrackMx.Unlock()
-	if dest == nil {
+	p.tcpOriginsMx.Lock()
+	o := p.tcpOrigins[dstAddr]
+	p.tcpOriginsMx.Unlock()
+	if o == nil {
 		var err error
-		dest, err = p.startTCPDest(dstAddr)
+		o, err = p.createTCPOrigin(dstAddr)
 		if err != nil {
 			log.Error(err)
 			return
 		}
-		p.tcpConnTrackMx.Lock()
-		p.tcpConnTrack[dstAddr] = dest
-		p.tcpConnTrackMx.Unlock()
+		p.tcpOriginsMx.Lock()
+		p.tcpOrigins[dstAddr] = o
+		p.tcpOriginsMx.Unlock()
 	}
 
 	p.channelEndpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
 }
 
-func (p *proxy) startTCPDest(dstAddr addr) (*origin, error) {
+func (p *proxy) createTCPOrigin(dstAddr addr) (*origin, error) {
 	nicID := p.nextNICID()
 	if err := p.stack.CreateNIC(nicID, p.linkID); err != nil {
 		return nil, errors.New("Unable to create TCP NIC: %v", err)
 	}
 	ipAddr := tcpip.Address(net.ParseIP(dstAddr.ip).To4())
 	if err := p.stack.AddAddress(nicID, p.proto, ipAddr); err != nil {
-		return nil, errors.New("Unable to add IP addr for TCP dest: %v", err)
+		return nil, errors.New("Unable to add IP addr for TCP origin: %v", err)
 	}
 
-	dest := newOrigin(p, dstAddr.String(), func() error {
-		p.removeTCPDest(dstAddr)
+	o := newOrigin(p, dstAddr.String(), func() error {
+		p.removeTCPOrigin(dstAddr)
 		return nil
 	})
-	dest.markActive()
+	o.markActive()
 
-	if err := dest.init(tcp.ProtocolNumber, tcpip.FullAddress{nicID, ipAddr, dstAddr.port}); err != nil {
-		return nil, errors.New("Unable to initialize TCP dest: %v", err)
+	if err := o.init(tcp.ProtocolNumber, tcpip.FullAddress{nicID, ipAddr, dstAddr.port}); err != nil {
+		return nil, errors.New("Unable to initialize TCP origin: %v", err)
 	}
 
-	if err := dest.ep.Listen(p.opts.TCPConnectBacklog); err != nil {
-		dest.finalize()
+	if err := o.ep.Listen(p.opts.TCPConnectBacklog); err != nil {
+		o.finalize()
 		return nil, errors.New("Unable to listen for TCP connections: %v", err)
 	}
 
-	go acceptTCP(dest)
-	return dest, nil
+	go acceptTCP(o)
+	return o, nil
 }
 
-func acceptTCP(dest *origin) {
+func acceptTCP(o *origin) {
 	defer func() {
-		dest.closedCh <- dest.finalize()
-		close(dest.closedCh)
+		o.closedCh <- o.finalize()
+		close(o.closedCh)
 	}()
 
 	for {
-		acceptedEp, wq, err := dest.ep.Accept()
+		acceptedEp, wq, err := o.ep.Accept()
 		if err != nil {
 			if err == tcpip.ErrWouldBlock {
 				select {
-				case <-dest.closeCh:
+				case <-o.closeCh:
 					return
-				case <-dest.notifyCh:
+				case <-o.notifyCh:
 					continue
 				}
 			}
@@ -83,82 +83,82 @@ func acceptTCP(dest *origin) {
 			return
 		}
 
-		upstream, dialErr := dest.p.opts.DialTCP(context.Background(), "tcp", dest.addr)
+		upstream, dialErr := o.p.opts.DialTCP(context.Background(), "tcp", o.addr)
 		if dialErr != nil {
-			log.Errorf("Unexpected error dialing upstream to %v: %v", dest.addr, err)
+			log.Errorf("Unexpected error dialing upstream to %v: %v", o.addr, err)
 			return
 		}
 
 		downstreamAddr, _ := acceptedEp.GetRemoteAddress()
-		tcpConn := newBaseConnWithQueue(dest.p, upstream, wq, func() error {
-			dest.removeClient(downstreamAddr)
+		tcpConn := newBaseConnWithQueue(o.p, upstream, wq, func() error {
+			o.removeClient(downstreamAddr)
 			return nil
 		})
 		tcpConn.ep = acceptedEp
 		go tcpConn.copyToUpstream(nil)
 		go tcpConn.copyFromUpstream(tcpip.WriteOptions{})
 		tcpConn.markActive()
-		dest.addClient(downstreamAddr, &tcpConn)
+		o.addClient(downstreamAddr, &tcpConn)
 	}
 }
 
-func (p *proxy) removeTCPDest(dstAddr addr) {
-	p.tcpConnTrackMx.Lock()
-	delete(p.tcpConnTrack, dstAddr)
-	p.tcpConnTrackMx.Unlock()
+func (p *proxy) removeTCPOrigin(dstAddr addr) {
+	p.tcpOriginsMx.Lock()
+	delete(p.tcpOrigins, dstAddr)
+	p.tcpOriginsMx.Unlock()
 }
 
-// reapUDP reaps idled TCP connections and destinations. We do this on a single
+// reapUDP reaps idled TCP connections and origins. We do this on a single
 // goroutine to avoid creating a bunch of timers for each connection
 // (which is expensive).
 func (p *proxy) reapTCP() {
 	for {
 		time.Sleep(1 * time.Second)
-		p.tcpConnTrackMx.Lock()
-		dests := make(map[addr]*origin, len(p.tcpConnTrack))
-		for a, dest := range p.tcpConnTrack {
-			dests[a] = dest
+		p.tcpOriginsMx.Lock()
+		origins := make(map[addr]*origin, len(p.tcpOrigins))
+		for a, o := range p.tcpOrigins {
+			origins[a] = o
 		}
-		p.tcpConnTrackMx.Unlock()
+		p.tcpOriginsMx.Unlock()
 
-		for a, dest := range dests {
-			dest.clientsMx.Lock()
-			conns := make([]*baseConn, 0, len(dest.clients))
-			for _, conn := range dest.clients {
+		for a, o := range origins {
+			o.clientsMx.Lock()
+			conns := make([]*baseConn, 0, len(o.clients))
+			for _, conn := range o.clients {
 				conns = append(conns, conn)
 			}
-			dest.clientsMx.Unlock()
+			o.clientsMx.Unlock()
 			if len(conns) > 0 {
-				for _, conn := range dest.clients {
+				for _, conn := range o.clients {
 					if conn.timeSinceLastActive() > p.opts.IdleTimeout {
 						go conn.Close()
 					}
 				}
-			} else if dest.timeSinceLastActive() > p.opts.IdleTimeout {
-				dest.p.removeTCPDest(a)
-				go dest.Close()
+			} else if o.timeSinceLastActive() > p.opts.IdleTimeout {
+				o.p.removeTCPOrigin(a)
+				go o.Close()
 			}
 		}
 	}
 }
 
 func (p *proxy) finalizeTCP() (err error) {
-	p.tcpConnTrackMx.Lock()
-	dests := make(map[addr]*origin, len(p.tcpConnTrack))
-	for a, dest := range p.tcpConnTrack {
-		dests[a] = dest
+	p.tcpOriginsMx.Lock()
+	origins := make(map[addr]*origin, len(p.tcpOrigins))
+	for a, o := range p.tcpOrigins {
+		origins[a] = o
 	}
-	p.tcpConnTrackMx.Unlock()
+	p.tcpOriginsMx.Unlock()
 
-	for _, dest := range dests {
-		dest.clientsMx.Lock()
-		conns := make([]*baseConn, 0, len(dest.clients))
-		for _, conn := range dest.clients {
+	for _, o := range origins {
+		o.clientsMx.Lock()
+		conns := make([]*baseConn, 0, len(o.clients))
+		for _, conn := range o.clients {
 			conns = append(conns, conn)
 		}
-		dest.clientsMx.Unlock()
+		o.clientsMx.Unlock()
 
-		for _, conn := range dest.clients {
+		for _, conn := range o.clients {
 			if conn.timeSinceLastActive() > p.opts.IdleTimeout {
 				_err := conn.Close()
 				if err == nil {
@@ -167,7 +167,7 @@ func (p *proxy) finalizeTCP() (err error) {
 			}
 		}
 
-		_err := dest.Close()
+		_err := o.Close()
 		if err == nil {
 			err = _err
 		}
