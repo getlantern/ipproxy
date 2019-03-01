@@ -12,14 +12,14 @@ func (p *proxy) trackStats() {
 		case <-p.closeCh:
 			return
 		case <-ticker.C:
-			numTCPOrigins, numTCPClients, numUDPClients := p.ConnCounts()
-			log.Debugf("TCP Origins: %v   TCP Clients: %v    UDP Clients: %v", numTCPOrigins, numTCPClients, numUDPClients)
+			numTCPOrigins, numTCPClients, numUDPConns := p.ConnCounts()
+			log.Debugf("TCP Origins: %v   TCP Clients: %v    UDP Conns: %v", numTCPOrigins, numTCPClients, numUDPConns)
 			log.Debugf("Accepted Packets: %d    Rejected Packets: %d", p.AcceptedPackets(), p.RejectedPackets())
 		}
 	}
 }
 
-func (p *proxy) ConnCounts() (numTCPOrigins int, numTCPClients int, numUDPClients int) {
+func (p *proxy) ConnCounts() (numTCPOrigins int, numTCPClients int, numUDPConns int) {
 	p.tcpOriginsMx.Lock()
 	origins := make([]*origin, 0, len(p.tcpOrigins))
 	for _, o := range p.tcpOrigins {
@@ -31,9 +31,9 @@ func (p *proxy) ConnCounts() (numTCPOrigins int, numTCPClients int, numUDPClient
 		numTCPClients += o.numClients()
 	}
 
-	p.udpConnTrackMx.Lock()
-	numUDPClients = len(p.udpConnTrack)
-	p.udpConnTrackMx.Unlock()
+	p.udpConnsMx.Lock()
+	numUDPConns = len(p.udpConns)
+	p.udpConnsMx.Unlock()
 
 	return
 }

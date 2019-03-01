@@ -16,9 +16,9 @@ import (
 
 func (p *proxy) onUDP(pkt ipPacket) {
 	ft := pkt.ft()
-	p.udpConnTrackMx.Lock()
-	conn := p.udpConnTrack[ft]
-	p.udpConnTrackMx.Unlock()
+	p.udpConnsMx.Lock()
+	conn := p.udpConns[ft]
+	p.udpConnsMx.Unlock()
 	if conn == nil {
 		var err error
 		conn, err = p.startUDPConn(ft)
@@ -26,9 +26,9 @@ func (p *proxy) onUDP(pkt ipPacket) {
 			log.Error(err)
 			return
 		}
-		p.udpConnTrackMx.Lock()
-		p.udpConnTrack[ft] = conn
-		p.udpConnTrackMx.Unlock()
+		p.udpConnsMx.Lock()
+		p.udpConns[ft] = conn
+		p.udpConnsMx.Unlock()
 	}
 
 	conn.channelEndpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
@@ -46,9 +46,9 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 
 	conn := &udpConn{
 		origin: *newOrigin(p, ft.dst, func() error {
-			p.udpConnTrackMx.Lock()
-			delete(p.udpConnTrack, ft)
-			p.udpConnTrackMx.Unlock()
+			p.udpConnsMx.Lock()
+			delete(p.udpConns, ft)
+			p.udpConnsMx.Unlock()
 			return nil
 		}),
 		ft: ft,
@@ -91,12 +91,12 @@ type udpConn struct {
 func (p *proxy) reapUDP() {
 	for {
 		time.Sleep(1 * time.Second)
-		p.udpConnTrackMx.Lock()
-		conns := make([]*udpConn, 0, len(p.udpConnTrack))
-		for _, conn := range p.udpConnTrack {
+		p.udpConnsMx.Lock()
+		conns := make([]*udpConn, 0, len(p.udpConns))
+		for _, conn := range p.udpConns {
 			conns = append(conns, conn)
 		}
-		p.udpConnTrackMx.Unlock()
+		p.udpConnsMx.Unlock()
 		for _, conn := range conns {
 			if conn.timeSinceLastActive() > p.opts.IdleTimeout {
 				go conn.Close()
@@ -106,12 +106,12 @@ func (p *proxy) reapUDP() {
 }
 
 func (p *proxy) finalizeUDP() (err error) {
-	p.udpConnTrackMx.Lock()
+	p.udpConnsMx.Lock()
 	conns := make([]*udpConn, 0)
-	for _, conn := range p.udpConnTrack {
+	for _, conn := range p.udpConns {
 		conns = append(conns, conn)
 	}
-	p.udpConnTrackMx.Unlock()
+	p.udpConnsMx.Unlock()
 
 	for _, conn := range conns {
 		_err := conn.Close()

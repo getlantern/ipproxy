@@ -109,7 +109,7 @@ type Proxy interface {
 	Serve() error
 
 	// ConnCounts gets current counts of connections
-	ConnCounts() (numTCPOrigins int, numTCPClients int, numUDPClients int)
+	ConnCounts() (numTCPOrigins int, numTCPClients int, numUDPConns int)
 
 	// Close shuts down the proxy in an orderly fashion and blocks until shutdown
 	// is complete.
@@ -125,10 +125,10 @@ type proxy struct {
 	downstream io.ReadWriter
 	pool       *bpool.BytePool
 
-	tcpOrigins     map[addr]*origin
-	tcpOriginsMx   sync.Mutex
-	udpConnTrack   map[fourtuple]*udpConn
-	udpConnTrackMx sync.Mutex
+	tcpOrigins   map[addr]*origin
+	tcpOriginsMx sync.Mutex
+	udpConns     map[fourtuple]*udpConn
+	udpConnsMx   sync.Mutex
 
 	toDownstream chan channel.PacketInfo
 
@@ -156,7 +156,7 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		downstream:   downstream,
 		pool:         bpool.NewBytePool(opts.BufferPoolSize, opts.MTU),
 		tcpOrigins:   make(map[addr]*origin, 0),
-		udpConnTrack: make(map[fourtuple]*udpConn, 0),
+		udpConns:     make(map[fourtuple]*udpConn, 0),
 		toDownstream: make(chan channel.PacketInfo),
 		closeable: closeable{
 			closeCh:  make(chan struct{}),

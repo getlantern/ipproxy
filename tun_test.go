@@ -44,9 +44,9 @@ func TestTCPandUDP(t *testing.T) {
 		},
 		func(p Proxy, dev io.Closer) {
 			time.Sleep(2 * shortIdleTimeout)
-			numTCPOrigins, _, numUDPClients := p.ConnCounts()
+			numTCPOrigins, _, numUDPConns := p.ConnCounts()
 			assert.Zero(t, numTCPOrigins, "TCP origin should be purged after idle timeout")
-			assert.Zero(t, numUDPClients, "UDP client should be purged after idle timeout")
+			assert.Zero(t, numUDPConns, "UDP conn should be purged after idle timeout")
 		})
 }
 
@@ -66,20 +66,20 @@ func TestCloseCleanup(t *testing.T) {
 		},
 		func(p Proxy, dev io.Closer) {
 			time.Sleep(2 * shortIdleTimeout)
-			numTCPOrigins, numTCPClients, numUDPClients := p.ConnCounts()
+			numTCPOrigins, numTCPClients, numUDPConns := p.ConnCounts()
 			assert.Equal(t, 1, numTCPOrigins, "TCP origin should not be purged before idle timeout")
 			assert.Equal(t, 1, numTCPClients, "TCP client should not be purged before idle timeout")
-			assert.Equal(t, 1, numUDPClients, "UDP client should not be purged before idle timeout")
+			assert.Equal(t, 1, numUDPConns, "UDP conns should not be purged before idle timeout")
 			err := dev.Close()
 			if assert.NoError(t, err) {
 				err = p.Close()
 				if assert.NoError(t, err) {
 					log.Debug("Checking")
-					numTCPOrigins, numTCPClients, numUDPClients := p.ConnCounts()
+					numTCPOrigins, numTCPClients, numUDPConns = p.ConnCounts()
 					log.Debug("Got counts")
 					assert.Zero(t, numTCPOrigins, "TCP origin should be purged after close")
 					assert.Zero(t, numTCPClients, "TCP client should be purged after close")
-					assert.Zero(t, numUDPClients, "UDP client should be purged after close")
+					assert.Zero(t, numUDPConns, "UDP conns should be purged after close")
 					log.Debug("Done checking")
 				}
 			}
