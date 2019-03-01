@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -144,4 +145,38 @@ func (conn *baseConn) finalize() error {
 	}
 
 	return err
+}
+
+func newOrigin(p *proxy, addr string, finalizer func() error) *origin {
+	return &origin{
+		baseConn: newBaseConnWithQueue(p, nil, &waiter.Queue{}, finalizer),
+		addr:     addr,
+		clients:  make(map[tcpip.FullAddress]*baseConn),
+	}
+}
+
+type origin struct {
+	baseConn
+	addr      string
+	clients   map[tcpip.FullAddress]*baseConn
+	clientsMx sync.Mutex
+}
+
+func (o *origin) addClient(addr tcpip.FullAddress, client *baseConn) {
+	o.clientsMx.Lock()
+	o.clients[addr] = client
+	o.clientsMx.Unlock()
+}
+
+func (o *origin) removeClient(addr tcpip.FullAddress) {
+	o.clientsMx.Lock()
+	delete(o.clients, addr)
+	o.clientsMx.Unlock()
+}
+
+func (o *origin) numClients() int {
+	o.clientsMx.Lock()
+	numClients := len(o.clients)
+	o.clientsMx.Unlock()
+	return numClients
 }

@@ -3,7 +3,6 @@ package ipproxy
 import (
 	"context"
 	"net"
-	"sync"
 	"time"
 
 	"github.com/google/netstack/tcpip"
@@ -34,7 +33,7 @@ func (p *proxy) onTCP(pkt ipPacket) {
 	p.channelEndpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
 }
 
-func (p *proxy) startTCPDest(dstAddr addr) (*tcpDest, error) {
+func (p *proxy) startTCPDest(dstAddr addr) (*origin, error) {
 	nicID := p.nextNICID()
 	if err := p.stack.CreateNIC(nicID, p.linkID); err != nil {
 		return nil, errors.New("Unable to create TCP NIC: %v", err)
@@ -44,14 +43,10 @@ func (p *proxy) startTCPDest(dstAddr addr) (*tcpDest, error) {
 		return nil, errors.New("Unable to add IP addr for TCP dest: %v", err)
 	}
 
-	dest := &tcpDest{
-		baseConn: newBaseConn(p, nil, func() error {
-			p.removeTCPDest(dstAddr)
-			return nil
-		}),
-		addr:  dstAddr.String(),
-		conns: make(map[tcpip.FullAddress]*baseConn),
-	}
+	dest := newOrigin(p, dstAddr.String(), func() error {
+		p.removeTCPDest(dstAddr)
+		return nil
+	})
 	dest.markActive()
 
 	if err := dest.init(tcp.ProtocolNumber, tcpip.FullAddress{nicID, ipAddr, dstAddr.port}); err != nil {
@@ -63,18 +58,11 @@ func (p *proxy) startTCPDest(dstAddr addr) (*tcpDest, error) {
 		return nil, errors.New("Unable to listen for TCP connections: %v", err)
 	}
 
-	go dest.accept()
+	go acceptTCP(dest)
 	return dest, nil
 }
 
-type tcpDest struct {
-	baseConn
-	addr    string
-	conns   map[tcpip.FullAddress]*baseConn
-	connsMx sync.Mutex
-}
-
-func (dest *tcpDest) accept() {
+func acceptTCP(dest *origin) {
 	defer func() {
 		dest.closedCh <- dest.finalize()
 		close(dest.closedCh)
@@ -103,30 +91,15 @@ func (dest *tcpDest) accept() {
 
 		downstreamAddr, _ := acceptedEp.GetRemoteAddress()
 		tcpConn := newBaseConnWithQueue(dest.p, upstream, wq, func() error {
-			dest.removeConn(downstreamAddr)
+			dest.removeClient(downstreamAddr)
 			return nil
 		})
 		tcpConn.ep = acceptedEp
 		go tcpConn.copyToUpstream(nil)
 		go tcpConn.copyFromUpstream(tcpip.WriteOptions{})
 		tcpConn.markActive()
-		dest.connsMx.Lock()
-		dest.conns[downstreamAddr] = &tcpConn
-		dest.connsMx.Unlock()
+		dest.addClient(downstreamAddr, &tcpConn)
 	}
-}
-
-func (dest *tcpDest) removeConn(addr tcpip.FullAddress) {
-	dest.connsMx.Lock()
-	delete(dest.conns, addr)
-	dest.connsMx.Unlock()
-}
-
-func (dest *tcpDest) numConns() int {
-	dest.connsMx.Lock()
-	numConns := len(dest.conns)
-	dest.connsMx.Unlock()
-	return numConns
 }
 
 func (p *proxy) removeTCPDest(dstAddr addr) {
@@ -142,21 +115,21 @@ func (p *proxy) reapTCP() {
 	for {
 		time.Sleep(1 * time.Second)
 		p.tcpConnTrackMx.Lock()
-		dests := make(map[addr]*tcpDest, len(p.tcpConnTrack))
+		dests := make(map[addr]*origin, len(p.tcpConnTrack))
 		for a, dest := range p.tcpConnTrack {
 			dests[a] = dest
 		}
 		p.tcpConnTrackMx.Unlock()
 
 		for a, dest := range dests {
-			dest.connsMx.Lock()
-			conns := make([]*baseConn, 0, len(dest.conns))
-			for _, conn := range dest.conns {
+			dest.clientsMx.Lock()
+			conns := make([]*baseConn, 0, len(dest.clients))
+			for _, conn := range dest.clients {
 				conns = append(conns, conn)
 			}
-			dest.connsMx.Unlock()
+			dest.clientsMx.Unlock()
 			if len(conns) > 0 {
-				for _, conn := range dest.conns {
+				for _, conn := range dest.clients {
 					if conn.timeSinceLastActive() > p.opts.IdleTimeout {
 						go conn.Close()
 					}
@@ -171,21 +144,21 @@ func (p *proxy) reapTCP() {
 
 func (p *proxy) finalizeTCP() (err error) {
 	p.tcpConnTrackMx.Lock()
-	dests := make(map[addr]*tcpDest, len(p.tcpConnTrack))
+	dests := make(map[addr]*origin, len(p.tcpConnTrack))
 	for a, dest := range p.tcpConnTrack {
 		dests[a] = dest
 	}
 	p.tcpConnTrackMx.Unlock()
 
 	for _, dest := range dests {
-		dest.connsMx.Lock()
-		conns := make([]*baseConn, 0, len(dest.conns))
-		for _, conn := range dest.conns {
+		dest.clientsMx.Lock()
+		conns := make([]*baseConn, 0, len(dest.clients))
+		for _, conn := range dest.clients {
 			conns = append(conns, conn)
 		}
-		dest.connsMx.Unlock()
+		dest.clientsMx.Unlock()
 
-		for _, conn := range dest.conns {
+		for _, conn := range dest.clients {
 			if conn.timeSinceLastActive() > p.opts.IdleTimeout {
 				_err := conn.Close()
 				if err == nil {

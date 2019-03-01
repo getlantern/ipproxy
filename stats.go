@@ -21,14 +21,14 @@ func (p *proxy) trackStats() {
 
 func (p *proxy) ConnCounts() (numTCPDests int, numTCPConns int, numUDPConns int) {
 	p.tcpConnTrackMx.Lock()
-	dests := make([]*tcpDest, 0, len(p.tcpConnTrack))
+	dests := make([]*origin, 0, len(p.tcpConnTrack))
 	for _, dest := range p.tcpConnTrack {
 		dests = append(dests, dest)
 	}
 	p.tcpConnTrackMx.Unlock()
 	numTCPDests = len(dests)
 	for _, dest := range dests {
-		numTCPConns += dest.numConns()
+		numTCPConns += dest.numClients()
 	}
 
 	p.udpConnTrackMx.Lock()

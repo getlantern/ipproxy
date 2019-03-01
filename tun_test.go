@@ -28,8 +28,9 @@ var (
 func TestTCPandUDP(t *testing.T) {
 	doTest(
 		t,
+		2,
 		shortIdleTimeout,
-		"10.0.0.2", "10.0.0.1",
+		"10.0.0.4", "10.0.0.3",
 		func(p Proxy, uconn net.Conn, b []byte) {
 			assert.Equal(t, "helloudp", string(b))
 		},
@@ -54,8 +55,9 @@ func TestTCPandUDP(t *testing.T) {
 func TestCloseCleanup(t *testing.T) {
 	doTest(
 		t,
+		1,
 		longIdleTimeout,
-		"10.0.0.4", "10.0.0.3",
+		"10.0.0.6", "10.0.0.5",
 		func(p Proxy, uconn net.Conn, b []byte) {
 			assert.Equal(t, "helloudp", string(b))
 		},
@@ -84,7 +86,7 @@ func TestCloseCleanup(t *testing.T) {
 		})
 }
 
-func doTest(t *testing.T, idleTimeout time.Duration, addr string, gw string, afterUDP func(Proxy, net.Conn, []byte), afterTCP func(Proxy, net.Conn, []byte), finish func(Proxy, io.Closer)) {
+func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw string, afterUDP func(Proxy, net.Conn, []byte), afterTCP func(Proxy, net.Conn, []byte), finish func(Proxy, io.Closer)) {
 	atomic.StoreInt64(&serverTCPConnections, 0)
 	ip := "127.0.0.1"
 
@@ -127,8 +129,6 @@ func doTest(t *testing.T, idleTimeout time.Duration, addr string, gw string, aft
 	_, port, _ := net.SplitHostPort(echoAddr)
 	echoAddr = gw + ":" + port
 
-	b := make([]byte, 8)
-
 	_, tcpConnCount, err := fdcount.Matching("TCP")
 	if !assert.NoError(t, err, "unable to get initial TCP socket count") {
 		return
@@ -138,43 +138,47 @@ func doTest(t *testing.T, idleTimeout time.Duration, addr string, gw string, aft
 		return
 	}
 
-	log.Debugf("UDP dialing echo server at: %v", echoAddr)
-	uconn, err := net.Dial("udp", echoAddr)
-	if !assert.NoError(t, err, "Unable to get UDP connection to TUN device") {
-		return
-	}
-	defer uconn.Close()
+	for i := 0; i < loops; i++ {
+		log.Debugf("Loop %d", i)
+		b := make([]byte, 8)
+		log.Debugf("UDP dialing echo server at: %v", echoAddr)
+		uconn, err := net.Dial("udp", echoAddr)
+		if !assert.NoError(t, err, "Unable to get UDP connection to TUN device") {
+			return
+		}
+		defer uconn.Close()
 
-	_, err = uconn.Write([]byte("helloudp"))
-	if !assert.NoError(t, err) {
-		return
-	}
+		_, err = uconn.Write([]byte("helloudp"))
+		if !assert.NoError(t, err) {
+			return
+		}
 
-	uconn.SetDeadline(time.Now().Add(250 * time.Millisecond))
-	_, err = io.ReadFull(uconn, b)
-	if !assert.NoError(t, err) {
-		return
-	}
-	afterUDP(p, uconn, b)
+		uconn.SetDeadline(time.Now().Add(250 * time.Millisecond))
+		_, err = io.ReadFull(uconn, b)
+		if !assert.NoError(t, err) {
+			return
+		}
+		afterUDP(p, uconn, b)
 
-	log.Debugf("TCP dialing echo server at: %v", echoAddr)
-	conn, err := net.DialTimeout("tcp4", echoAddr, 5*time.Second)
-	if !assert.NoError(t, err) {
-		return
-	}
-	defer conn.Close()
+		log.Debugf("TCP dialing echo server at: %v", echoAddr)
+		conn, err := net.DialTimeout("tcp4", echoAddr, 5*time.Second)
+		if !assert.NoError(t, err) {
+			return
+		}
+		defer conn.Close()
 
-	_, err = conn.Write([]byte("hellotcp"))
-	if !assert.NoError(t, err) {
-		return
-	}
+		_, err = conn.Write([]byte("hellotcp"))
+		if !assert.NoError(t, err) {
+			return
+		}
 
-	_, err = io.ReadFull(conn, b)
-	if !assert.NoError(t, err) {
-		return
+		_, err = io.ReadFull(conn, b)
+		if !assert.NoError(t, err) {
+			return
+		}
+		afterTCP(p, conn, b)
+		finish(p, dev)
 	}
-	afterTCP(p, conn, b)
-	finish(p, dev)
 
 	close(closeCh)
 	tcpConnCount.AssertDelta(0)

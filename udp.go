@@ -81,7 +81,7 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 	conn.markActive()
 
 	if err := conn.init(udp.ProtocolNumber, tcpip.FullAddress{nicID, upstreamIPAddr, ft.dst.port}); err != nil {
-		return nil, errors.New("Unable to initialize UDP connection: %v", err)
+		return nil, errors.New("Unable to initialize UDP connection for %v: %v", ft, err)
 	}
 
 	go conn.copyToUpstream(&tcpip.FullAddress{0, "", ft.dst.port})
