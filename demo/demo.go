@@ -13,7 +13,6 @@ import (
 	"github.com/getlantern/golog"
 	"github.com/getlantern/gotun"
 	"github.com/getlantern/ipproxy"
-	"github.com/getlantern/netx"
 )
 
 var (
@@ -26,6 +25,8 @@ var (
 	tunMask   = flag.String("tun-mask", "255.255.255.0", "tun device netmask")
 	tunGW     = flag.String("tun-gw", "10.0.0.1", "tun device gateway")
 	ifOut     = flag.String("ifout", "en0", "name of interface to use for outbound connections")
+	tcpDest   = flag.String("tcpdest", "speedtest-ny.turnkeyinternet.net", "destination to which to connect all TCP traffic")
+	udpDest   = flag.String("udpdest", "8.8.8.8", "destination to which to connect all UDP traffic")
 )
 
 type fivetuple struct {
@@ -85,22 +86,23 @@ func main() {
 		log.Debug("Closed TUN device")
 	}()
 
+	var d net.Dialer
 	p, err := ipproxy.New(dev, &ipproxy.Opts{
 		IdleTimeout:   65 * time.Second,
 		StatsInterval: 3 * time.Second,
 		DialTCP: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			raddr, err := netx.Resolve(network, addr)
-			if err != nil {
-				return nil, err
-			}
-			return net.DialTCP(network, laddrTCP, raddr)
+			// Send everything to tcpDest
+			_, port, _ := net.SplitHostPort(addr)
+			return d.DialContext(ctx, network, *tcpDest+":"+port)
 		},
 		DialUDP: func(ctx context.Context, network, addr string) (*net.UDPConn, error) {
-			raddr, err := netx.ResolveUDPAddr(network, addr)
-			if err != nil {
-				return nil, err
+			// Send everything to udpDest
+			_, port, _ := net.SplitHostPort(addr)
+			conn, dialErr := net.Dial(network, *udpDest+":"+port)
+			if dialErr != nil {
+				return nil, dialErr
 			}
-			return netx.DialUDP(network, laddrUDP, raddr)
+			return conn.(*net.UDPConn), nil
 		},
 	})
 	if err != nil {

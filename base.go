@@ -104,12 +104,31 @@ func (conn *baseConn) copyFromUpstream(responseOptions tcpip.WriteOptions) {
 			return
 		}
 
-		_, _, writeErr := conn.ep.Write(tcpip.SlicePayload(b[:n]), responseOptions)
+		writeErr := conn.writeToDownstream(b[:n], responseOptions)
 		if writeErr != nil {
 			log.Errorf("Unexpected error writing to downstream: %v", writeErr)
 			return
 		}
 		conn.markActive()
+	}
+}
+
+func (conn *baseConn) writeToDownstream(b []byte, responseOptions tcpip.WriteOptions) *tcpip.Error {
+	// write in a loop since partial writes are a possibility
+	for {
+		n, notifyCh, writeErr := conn.ep.Write(tcpip.SlicePayload(b), responseOptions)
+		if writeErr != nil {
+			if writeErr == tcpip.ErrWouldBlock {
+				<-notifyCh
+				continue
+			}
+			return writeErr
+		}
+		b = b[n:]
+		if len(b) == 0 {
+			// done writing
+			return nil
+		}
 	}
 }
 

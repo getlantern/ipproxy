@@ -25,7 +25,7 @@ var (
 
 const (
 	DefaultMTU                 = 1500
-	DefaultOutboundBufferDepth = 1
+	DefaultOutboundBufferDepth = 1000
 	DefaultBufferPoolSize      = 100
 	DefaultIdleTimeout         = 65 * time.Second
 	DefaultTCPConnectBacklog   = 10
@@ -222,8 +222,9 @@ func (p *proxy) copyFromUpstream() {
 				log.Errorf("Unexpected error writing to downstream: %v", err)
 				return
 			}
-			p.pool.Put(pkt)
-			p.pool.Put(pktInfo.Payload)
+			// TODO: for some reason, attempting to recycle buffers does not work, causing TCP connections to stall
+			// p.pool.Put(pkt)
+			// p.pool.Put(pktInfo.Payload)
 		}
 	}
 }
