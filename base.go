@@ -141,17 +141,17 @@ func (conn *baseConn) timeSinceLastActive() time.Duration {
 }
 
 func (conn *baseConn) finalize() error {
+	conn.wq.EventUnregister(conn.waitEntry)
+	if conn.ep != nil {
+		conn.ep.Close()
+	}
+
 	err := conn.finalizer()
 	if conn.upstream != nil {
 		_err := conn.upstream.Close()
 		if err == nil {
 			err = _err
 		}
-	}
-
-	conn.wq.EventUnregister(conn.waitEntry)
-	if conn.ep != nil {
-		conn.ep.Close()
 	}
 
 	return err
