@@ -13,8 +13,6 @@ import (
 	"github.com/google/netstack/tcpip/link/channel"
 	"github.com/google/netstack/tcpip/network/ipv4"
 
-	"github.com/oxtoacart/bpool"
-
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
 )
@@ -25,8 +23,7 @@ var (
 
 const (
 	DefaultMTU                 = 1500
-	DefaultOutboundBufferDepth = 1000
-	DefaultBufferPoolSize      = 100
+	DefaultOutboundBufferDepth = 10000
 	DefaultIdleTimeout         = 65 * time.Second
 	DefaultTCPConnectBacklog   = 10
 	DefaultStatsInterval       = 15 * time.Second
@@ -43,10 +40,6 @@ type Opts struct {
 	// OutboundBufferDepth specifies the number of outbound packets to buffer.
 	// The default is 1.
 	OutboundBufferDepth int
-
-	// BufferPoolSize specifies the size of the packet buffer pool. The default is
-	// 100.
-	BufferPoolSize int
 
 	// IdleTimeout specifies the amount of time before idle connections are
 	// automatically closed. The default is 65 seconds.
@@ -75,9 +68,6 @@ func (opts *Opts) setDefaults() {
 	}
 	if opts.OutboundBufferDepth <= 0 {
 		opts.OutboundBufferDepth = DefaultOutboundBufferDepth
-	}
-	if opts.BufferPoolSize <= 0 {
-		opts.BufferPoolSize = DefaultBufferPoolSize
 	}
 	if opts.IdleTimeout <= 0 {
 		opts.IdleTimeout = DefaultIdleTimeout
@@ -123,7 +113,6 @@ type proxy struct {
 	opts       *Opts
 	proto      tcpip.NetworkProtocolNumber
 	downstream io.ReadWriter
-	pool       *bpool.BytePool
 
 	tcpOrigins   map[addr]*origin
 	tcpOriginsMx sync.Mutex
@@ -154,7 +143,6 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		opts:         opts,
 		proto:        ipv4.ProtocolNumber,
 		downstream:   downstream,
-		pool:         bpool.NewBytePool(opts.BufferPoolSize, opts.MTU),
 		tcpOrigins:   make(map[addr]*origin, 0),
 		udpConns:     make(map[fourtuple]*udpConn, 0),
 		toDownstream: make(chan channel.PacketInfo),
@@ -216,7 +204,6 @@ func (p *proxy) copyFromUpstream() {
 		case <-p.closedCh:
 			return
 		case pktInfo := <-p.toDownstream:
-			// pkt := p.pool.Get()[:0]
 			pkt := make([]byte, 0, p.opts.MTU)
 			pkt = append(pkt, pktInfo.Header...)
 			pkt = append(pkt, pktInfo.Payload...)
@@ -225,7 +212,6 @@ func (p *proxy) copyFromUpstream() {
 				log.Errorf("Unexpected error writing to downstream: %v", err)
 				return
 			}
-			// p.pool.Put(pkt)
 		}
 	}
 }
