@@ -2,7 +2,6 @@ package ipproxy
 
 import (
 	"io"
-	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -97,10 +96,6 @@ func (conn *baseConn) copyFromUpstream(responseOptions tcpip.WriteOptions) {
 		b := make([]byte, conn.p.opts.MTU-100) // make slightly smaller than MTU to leave space for packet headers
 		n, readErr := conn.upstream.Read(b)
 		if readErr != nil {
-			if neterr, ok := readErr.(net.Error); ok && neterr.Temporary() {
-				log.Debugf("Temporary read error: %v", readErr)
-				continue
-			}
 			if readErr != io.EOF && !strings.Contains(readErr.Error(), "use of closed network connection") {
 				log.Errorf("Unexpected error reading from upstream: %v", readErr)
 			}
