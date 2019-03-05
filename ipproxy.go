@@ -216,7 +216,8 @@ func (p *proxy) copyFromUpstream() {
 		case <-p.closedCh:
 			return
 		case pktInfo := <-p.toDownstream:
-			pkt := p.pool.Get()[:0]
+			// pkt := p.pool.Get()[:0]
+			pkt := make([]byte, 0, p.opts.MTU)
 			pkt = append(pkt, pktInfo.Header...)
 			pkt = append(pkt, pktInfo.Payload...)
 			_, err := p.downstream.Write(pkt)
@@ -224,7 +225,7 @@ func (p *proxy) copyFromUpstream() {
 				log.Errorf("Unexpected error writing to downstream: %v", err)
 				return
 			}
-			p.pool.Put(pkt)
+			// p.pool.Put(pkt)
 		}
 	}
 }
