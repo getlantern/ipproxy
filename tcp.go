@@ -124,7 +124,7 @@ func (p *proxy) reapTCP() {
 			}
 			o.clientsMx.Unlock()
 			if len(conns) > 0 {
-				for _, conn := range o.clients {
+				for _, conn := range conns {
 					if conn.timeSinceLastActive() > p.opts.IdleTimeout {
 						go conn.Close()
 					}
@@ -153,7 +153,7 @@ func (p *proxy) finalizeTCP() (err error) {
 		}
 		o.clientsMx.Unlock()
 
-		for _, conn := range o.clients {
+		for _, conn := range conns {
 			if conn.timeSinceLastActive() > p.opts.IdleTimeout {
 				_err := conn.Close()
 				if err == nil {

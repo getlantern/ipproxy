@@ -40,6 +40,8 @@ func (ft fivetuple) String() string {
 }
 
 func main() {
+	flag.Parse()
+
 	dev, err := tun.OpenTunDevice(*tunDevice, *tunAddr, *tunGW, *tunMask)
 	if err != nil {
 		log.Fatal(err)
@@ -93,7 +95,10 @@ func main() {
 		DialTCP: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			// Send everything to tcpDest
 			_, port, _ := net.SplitHostPort(addr)
-			return d.DialContext(ctx, network, *tcpDest+":"+port)
+			log.Debug(*tcpDest)
+			conn, err := d.DialContext(ctx, network, *tcpDest+":"+port)
+			log.Debugf("Dialed %v", conn.RemoteAddr())
+			return conn, err
 		},
 		DialUDP: func(ctx context.Context, network, addr string) (*net.UDPConn, error) {
 			// Send everything to udpDest

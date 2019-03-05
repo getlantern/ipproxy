@@ -161,26 +161,8 @@ func newOrigin(p *proxy, addr addr, finalizer func() error) *origin {
 	linkID, channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
 	s := stack.New([]string{ipv4.ProtocolName}, []string{tcp.ProtocolName, udp.ProtocolName}, stack.Options{})
 
-	myFinalizer := func() error {
-		// TODO: figure out right time/way to close channelEndpoint.C
-		// close(channelEndpoint.C)
-		return nil
-	}
-
-	finalFinalizer := myFinalizer
-	if finalizer != nil {
-		finalFinalizer = func() error {
-			err := finalizer()
-			_err := myFinalizer()
-			if err == nil {
-				err = _err
-			}
-			return err
-		}
-	}
-
 	o := &origin{
-		baseConn:        newBaseConn(p, nil, &waiter.Queue{}, finalFinalizer),
+		baseConn:        newBaseConn(p, nil, &waiter.Queue{}, finalizer),
 		addr:            addr.String(),
 		stack:           s,
 		linkID:          linkID,
@@ -202,8 +184,13 @@ type origin struct {
 }
 
 func (o *origin) copyToDownstream() {
-	for pktInfo := range o.channelEndpoint.C {
-		o.p.toDownstream <- pktInfo
+	for {
+		select {
+		case <-o.closedCh:
+			return
+		case pktInfo := <-o.channelEndpoint.C:
+			o.p.toDownstream <- pktInfo
+		}
 	}
 }
 
