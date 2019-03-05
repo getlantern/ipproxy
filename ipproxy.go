@@ -178,7 +178,9 @@ func (p *proxy) copyToUpstream() (finalErr error) {
 	}()
 
 	for {
-		b := p.pool.Get()
+		// we can't reuse this byte slice across reads because each one is held in
+		// memory by the tcpip stack.
+		b := make([]byte, p.opts.MTU)
 		n, err := p.downstream.Read(b)
 		if err != nil {
 			if err == io.EOF {
@@ -222,9 +224,7 @@ func (p *proxy) copyFromUpstream() {
 				log.Errorf("Unexpected error writing to downstream: %v", err)
 				return
 			}
-			// TODO: for some reason, attempting to recycle buffers does not work, causing TCP connections to stall
-			// p.pool.Put(pkt)
-			// p.pool.Put(pktInfo.Payload)
+			p.pool.Put(pkt)
 		}
 	}
 }

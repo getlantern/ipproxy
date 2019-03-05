@@ -95,7 +95,6 @@ func main() {
 		DialTCP: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			// Send everything to tcpDest
 			_, port, _ := net.SplitHostPort(addr)
-			log.Debug(*tcpDest)
 			conn, err := d.DialContext(ctx, network, *tcpDest+":"+port)
 			log.Debugf("Dialed %v", conn.RemoteAddr())
 			return conn, err

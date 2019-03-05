@@ -91,11 +91,14 @@ func (conn *baseConn) copyToUpstream(readAddr *tcpip.FullAddress) {
 func (conn *baseConn) copyFromUpstream(responseOptions tcpip.WriteOptions) {
 	defer conn.Close()
 
-	b := conn.p.pool.Get()
 	for {
+		// we can't reuse this byte slice across reads because each one is held in
+		// memory by the tcpip stack.
+		b := make([]byte, conn.p.opts.MTU-100) // make slightly smaller than MTU to leave space for packet headers
 		n, readErr := conn.upstream.Read(b)
 		if readErr != nil {
 			if neterr, ok := readErr.(net.Error); ok && neterr.Temporary() {
+				log.Debugf("Temporary read error: %v")
 				continue
 			}
 			if readErr != io.EOF && !strings.Contains(readErr.Error(), "use of closed network connection") {

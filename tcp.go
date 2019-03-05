@@ -9,6 +9,7 @@ import (
 	"github.com/google/netstack/tcpip/buffer"
 	"github.com/google/netstack/tcpip/network/ipv4"
 	"github.com/google/netstack/tcpip/transport/tcp"
+	"github.com/google/netstack/waiter"
 
 	"github.com/getlantern/errors"
 )
@@ -78,23 +79,27 @@ func acceptTCP(o *origin) {
 			return
 		}
 
-		upstream, dialErr := o.p.opts.DialTCP(context.Background(), "tcp", o.addr)
-		if dialErr != nil {
-			log.Errorf("Unexpected error dialing upstream to %v: %v", o.addr, err)
-			return
-		}
-
-		downstreamAddr, _ := acceptedEp.GetRemoteAddress()
-		tcpConn := newBaseConn(o.p, upstream, wq, func() error {
-			o.removeClient(downstreamAddr)
-			return nil
-		})
-		tcpConn.ep = acceptedEp
-		go tcpConn.copyToUpstream(nil)
-		go tcpConn.copyFromUpstream(tcpip.WriteOptions{})
-		tcpConn.markActive()
-		o.addClient(downstreamAddr, &tcpConn)
+		go o.onAccept(acceptedEp, wq)
 	}
+}
+
+func (o *origin) onAccept(acceptedEp tcpip.Endpoint, wq *waiter.Queue) {
+	upstream, dialErr := o.p.opts.DialTCP(context.Background(), "tcp", o.addr)
+	if dialErr != nil {
+		log.Errorf("Unexpected error dialing upstream to %v: %v", o.addr, dialErr)
+		return
+	}
+
+	downstreamAddr, _ := acceptedEp.GetRemoteAddress()
+	tcpConn := newBaseConn(o.p, upstream, wq, func() error {
+		o.removeClient(downstreamAddr)
+		return nil
+	})
+	tcpConn.ep = acceptedEp
+	go tcpConn.copyToUpstream(nil)
+	go tcpConn.copyFromUpstream(tcpip.WriteOptions{})
+	tcpConn.markActive()
+	o.addClient(downstreamAddr, &tcpConn)
 }
 
 func (p *proxy) removeTCPOrigin(dstAddr addr) {
