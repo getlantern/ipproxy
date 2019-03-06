@@ -22,7 +22,7 @@ var (
 )
 
 const (
-	DefaultMTU                 = 1500
+	DefaultMSS                 = 1400 // a little less than standard 1460 just to leave room for framed headers and other potential overhead
 	DefaultOutboundBufferDepth = 10000
 	DefaultIdleTimeout         = 65 * time.Second
 	DefaultTCPConnectBacklog   = 10
@@ -33,9 +33,9 @@ const (
 )
 
 type Opts struct {
-	// MTU is the maximum transmission unit in bytes. Default of 1500 is usually
+	// MSS is the maximum segment size in bytes. Default of 1400 is usually
 	// fine.
-	MTU int
+	MSS int
 
 	// OutboundBufferDepth specifies the number of outbound packets to buffer.
 	// The default is 1.
@@ -63,8 +63,8 @@ type Opts struct {
 }
 
 func (opts *Opts) setDefaults() {
-	if opts.MTU <= 0 {
-		opts.MTU = DefaultMTU
+	if opts.MSS <= 0 {
+		opts.MSS = DefaultMSS
 	}
 	if opts.OutboundBufferDepth <= 0 {
 		opts.OutboundBufferDepth = DefaultOutboundBufferDepth
@@ -168,7 +168,7 @@ func (p *proxy) copyToUpstream() (finalErr error) {
 	for {
 		// we can't reuse this byte slice across reads because each one is held in
 		// memory by the tcpip stack.
-		b := make([]byte, p.opts.MTU)
+		b := make([]byte, p.opts.MSS)
 		n, err := p.downstream.Read(b)
 		if err != nil {
 			if err == io.EOF {
@@ -204,7 +204,7 @@ func (p *proxy) copyFromUpstream() {
 		case <-p.closedCh:
 			return
 		case pktInfo := <-p.toDownstream:
-			pkt := make([]byte, 0, p.opts.MTU)
+			pkt := make([]byte, 0, p.opts.MSS)
 			pkt = append(pkt, pktInfo.Header...)
 			pkt = append(pkt, pktInfo.Payload...)
 			_, err := p.downstream.Write(pkt)
