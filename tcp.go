@@ -87,6 +87,7 @@ func (o *origin) onAccept(acceptedEp tcpip.Endpoint, wq *waiter.Queue) {
 	upstream, dialErr := o.p.opts.DialTCP(context.Background(), "tcp", o.addr)
 	if dialErr != nil {
 		log.Errorf("Unexpected error dialing upstream to %v: %v", o.addr, dialErr)
+		o.Close()
 		return
 	}
 

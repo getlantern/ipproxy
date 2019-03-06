@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	nicID = 1
+	nicID        = 1
+	maxWriteWait = 30 * time.Millisecond
 )
 
 type baseConn struct {
@@ -113,11 +114,18 @@ func (conn *baseConn) copyFromUpstream(responseOptions tcpip.WriteOptions) {
 
 func (conn *baseConn) writeToDownstream(b []byte, responseOptions tcpip.WriteOptions) *tcpip.Error {
 	// write in a loop since partial writes are a possibility
-	for {
-		n, notifyCh, writeErr := conn.ep.Write(tcpip.SlicePayload(b), responseOptions)
+	for i := time.Duration(0); true; i++ {
+		n, _, writeErr := conn.ep.Write(tcpip.SlicePayload(b), responseOptions)
 		if writeErr != nil {
 			if writeErr == tcpip.ErrWouldBlock {
-				<-notifyCh
+				// back off and retry
+				waitTime := i * 1 * time.Millisecond
+				if waitTime > maxWriteWait {
+					waitTime = maxWriteWait
+				}
+				if waitTime > 0 {
+					time.Sleep(waitTime)
+				}
 				continue
 			}
 			return writeErr
@@ -128,6 +136,7 @@ func (conn *baseConn) writeToDownstream(b []byte, responseOptions tcpip.WriteOpt
 			return nil
 		}
 	}
+	return nil
 }
 
 func (conn *baseConn) markActive() {
