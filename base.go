@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	nicID        = 1
-	maxWriteWait = 30 * time.Millisecond
+	nicID            = 1
+	maxWriteWait     = 30 * time.Millisecond
+	tcpipHeaderBytes = 40
 )
 
 type baseConn struct {
@@ -94,7 +95,7 @@ func (conn *baseConn) copyFromUpstream(responseOptions tcpip.WriteOptions) {
 	for {
 		// we can't reuse this byte slice across reads because each one is held in
 		// memory by the tcpip stack.
-		b := make([]byte, conn.p.opts.MSS-100) // make slightly smaller than mss to leave space for packet headers
+		b := make([]byte, conn.p.opts.MTU-tcpipHeaderBytes) // leave room for tcpip header that gets added later
 		n, readErr := conn.upstream.Read(b)
 		if readErr != nil {
 			if readErr != io.EOF && !strings.Contains(readErr.Error(), "use of closed network connection") {
@@ -165,7 +166,7 @@ func (conn *baseConn) finalize() error {
 }
 
 func newOrigin(p *proxy, addr addr, finalizer func() error) *origin {
-	linkID, channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MSS+100), "")
+	linkID, channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
 	s := stack.New([]string{ipv4.ProtocolName}, []string{tcp.ProtocolName, udp.ProtocolName}, stack.Options{})
 
 	o := &origin{

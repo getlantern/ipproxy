@@ -22,7 +22,7 @@ var (
 )
 
 const (
-	DefaultMSS                 = 1400 // a little less than standard 1460 just to leave room for framed headers and other potential overhead
+	DefaultMTU                 = 1500
 	DefaultOutboundBufferDepth = 10000
 	DefaultIdleTimeout         = 65 * time.Second
 	DefaultTCPConnectBacklog   = 10
@@ -33,9 +33,8 @@ const (
 )
 
 type Opts struct {
-	// MSS is the maximum segment size in bytes. Default of 1400 is usually
-	// fine.
-	MSS int
+	// MTU in bytes. Default of 1500 is usually fine.
+	MTU int
 
 	// OutboundBufferDepth specifies the number of outbound packets to buffer.
 	// The default is 1.
@@ -62,9 +61,14 @@ type Opts struct {
 	DialUDP func(ctx context.Context, network, addr string) (*net.UDPConn, error)
 }
 
-func (opts *Opts) setDefaults() {
-	if opts.MSS <= 0 {
-		opts.MSS = DefaultMSS
+// ApplyDefaults applies the default values to the given Opts, including making
+// a new Opts if opts is nil.
+func (opts *Opts) ApplyDefaults() *Opts {
+	if opts == nil {
+		opts = &Opts{}
+	}
+	if opts.MTU <= 0 {
+		opts.MTU = DefaultMTU
 	}
 	if opts.OutboundBufferDepth <= 0 {
 		opts.OutboundBufferDepth = DefaultOutboundBufferDepth
@@ -92,6 +96,7 @@ func (opts *Opts) setDefaults() {
 			return conn.(*net.UDPConn), nil
 		}
 	}
+	return opts
 }
 
 type Proxy interface {
@@ -134,10 +139,7 @@ func (p *proxy) Serve() error {
 
 func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 	// Default options
-	if opts == nil {
-		opts = &Opts{}
-	}
-	opts.setDefaults()
+	opts = opts.ApplyDefaults()
 
 	p := &proxy{
 		opts:         opts,
@@ -168,7 +170,7 @@ func (p *proxy) copyToUpstream() (finalErr error) {
 	for {
 		// we can't reuse this byte slice across reads because each one is held in
 		// memory by the tcpip stack.
-		b := make([]byte, p.opts.MSS)
+		b := make([]byte, p.opts.MTU)
 		n, err := p.downstream.Read(b)
 		if err != nil {
 			if err == io.EOF {
@@ -204,7 +206,7 @@ func (p *proxy) copyFromUpstream() {
 		case <-p.closedCh:
 			return
 		case pktInfo := <-p.toDownstream:
-			pkt := make([]byte, 0, p.opts.MSS)
+			pkt := make([]byte, 0, p.opts.MTU)
 			pkt = append(pkt, pktInfo.Header...)
 			pkt = append(pkt, pktInfo.Payload...)
 			_, err := p.downstream.Write(pkt)
