@@ -215,7 +215,7 @@ func (o *origin) init(transportProtocol tcpip.TransportProtocolNumber, ipAddr tc
 		return errors.New("Unable to create endpoint: %v", epErr)
 	}
 
-	if err := o.ep.Bind(bindAddr, nil); err != nil {
+	if err := o.ep.Bind(bindAddr); err != nil {
 		o.finalize()
 		return errors.New("Bind failed: %v", err)
 	}
