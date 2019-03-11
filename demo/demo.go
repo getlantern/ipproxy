@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -27,6 +29,7 @@ var (
 	ifOut     = flag.String("ifout", "en0", "name of interface to use for outbound connections")
 	tcpDest   = flag.String("tcpdest", "speedtest-ny.turnkeyinternet.net", "destination to which to connect all TCP traffic")
 	udpDest   = flag.String("udpdest", "8.8.8.8", "destination to which to connect all UDP traffic")
+	pprofAddr = flag.String("pprofaddr", "", "pprof address to listen on, not activate pprof if empty")
 )
 
 type fivetuple struct {
@@ -41,6 +44,18 @@ func (ft fivetuple) String() string {
 
 func main() {
 	flag.Parse()
+
+	if *pprofAddr != "" {
+		go func() {
+			log.Debugf("Starting pprof page at http://%s/debug/pprof", *pprofAddr)
+			srv := &http.Server{
+				Addr: *pprofAddr,
+			}
+			if err := srv.ListenAndServe(); err != nil {
+				log.Error(err)
+			}
+		}()
+	}
 
 	dev, err := tun.OpenTunDevice(*tunDevice, *tunAddr, *tunGW, *tunMask)
 	if err != nil {
@@ -90,7 +105,7 @@ func main() {
 
 	var d net.Dialer
 	p, err := ipproxy.New(dev, &ipproxy.Opts{
-		IdleTimeout:   65 * time.Second,
+		IdleTimeout:   2 * time.Second,
 		StatsInterval: 3 * time.Second,
 		DialTCP: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			// Send everything to tcpDest

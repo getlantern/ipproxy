@@ -2,7 +2,6 @@ package ipproxy
 
 import (
 	"context"
-	"net"
 	"time"
 
 	"github.com/google/netstack/tcpip"
@@ -41,8 +40,7 @@ func (p *proxy) createTCPOrigin(dstAddr addr) (*origin, error) {
 	})
 	o.markActive()
 
-	upstreamIPAddr := tcpip.Address(net.ParseIP(dstAddr.ip).To4())
-	if err := o.init(tcp.ProtocolNumber, upstreamIPAddr, tcpip.FullAddress{nicID, upstreamIPAddr, dstAddr.port}); err != nil {
+	if err := o.init(tcp.ProtocolNumber, tcpip.FullAddress{nicID, o.ipAddr, dstAddr.port}); err != nil {
 		return nil, errors.New("Unable to initialize TCP origin: %v", err)
 	}
 	if pErr := o.stack.SetPromiscuousMode(nicID, true); pErr != nil {
@@ -84,7 +82,7 @@ func acceptTCP(o *origin) {
 }
 
 func (o *origin) onAccept(acceptedEp tcpip.Endpoint, wq *waiter.Queue) {
-	upstream, dialErr := o.p.opts.DialTCP(context.Background(), "tcp", o.addr)
+	upstream, dialErr := o.p.opts.DialTCP(context.Background(), "tcp", o.addr.String())
 	if dialErr != nil {
 		log.Errorf("Unexpected error dialing upstream to %v: %v", o.addr, dialErr)
 		o.Close()

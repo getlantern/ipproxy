@@ -41,7 +41,6 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 		return nil, errors.New("Unable to dial upstream %v: %v", upstreamAddr, err)
 	}
 
-	upstreamIPAddr := tcpip.Address(net.ParseIP(ft.dst.ip).To4())
 	downstreamIPAddr := tcpip.Address(net.ParseIP(ft.src.ip).To4())
 
 	conn := &udpConn{
@@ -56,15 +55,15 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 	conn.upstream = upstream
 	conn.markActive()
 
-	if err := conn.init(udp.ProtocolNumber, upstreamIPAddr, tcpip.FullAddress{nicID, "", ft.dst.port}); err != nil {
+	if err := conn.init(udp.ProtocolNumber, tcpip.FullAddress{nicID, "", ft.dst.port}); err != nil {
 		return nil, errors.New("Unable to initialize UDP connection for %v: %v", ft, err)
 	}
 
 	// to our NIC and routes packets to the downstreamIPAddr as well,
 	conn.stack.SetRouteTable([]tcpip.Route{
 		{
-			Destination: upstreamIPAddr,
-			Mask:        tcpip.AddressMask(upstreamIPAddr),
+			Destination: conn.ipAddr,
+			Mask:        tcpip.AddressMask(conn.ipAddr),
 			Gateway:     "",
 			NIC:         nicID,
 		},

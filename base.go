@@ -2,6 +2,7 @@ package ipproxy
 
 import (
 	"io"
+	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -169,9 +170,21 @@ func newOrigin(p *proxy, addr addr, finalizer func() error) *origin {
 	linkID, channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
 	s := stack.New([]string{ipv4.ProtocolName}, []string{tcp.ProtocolName, udp.ProtocolName}, stack.Options{})
 
+	ipAddr := tcpip.Address(net.ParseIP(addr.ip).To4())
+	fullFinalizer := func() (err error) {
+		if ipErr := s.RemoveAddress(nicID, ipAddr); ipErr != nil {
+			err = errors.New(ipErr.String())
+		}
+		if finalizer != nil {
+			err = finalizer()
+		}
+		return
+	}
+
 	o := &origin{
-		baseConn:        newBaseConn(p, nil, &waiter.Queue{}, finalizer),
-		addr:            addr.String(),
+		baseConn:        newBaseConn(p, nil, &waiter.Queue{}, fullFinalizer),
+		addr:            addr,
+		ipAddr:          ipAddr,
 		stack:           s,
 		linkID:          linkID,
 		channelEndpoint: channelEndpoint,
@@ -183,7 +196,8 @@ func newOrigin(p *proxy, addr addr, finalizer func() error) *origin {
 
 type origin struct {
 	baseConn
-	addr            string
+	addr            addr
+	ipAddr          tcpip.Address
 	stack           *stack.Stack
 	linkID          tcpip.LinkEndpointID
 	channelEndpoint *channel.Endpoint
@@ -202,11 +216,11 @@ func (o *origin) copyToDownstream() {
 	}
 }
 
-func (o *origin) init(transportProtocol tcpip.TransportProtocolNumber, ipAddr tcpip.Address, bindAddr tcpip.FullAddress) error {
+func (o *origin) init(transportProtocol tcpip.TransportProtocolNumber, bindAddr tcpip.FullAddress) error {
 	if err := o.stack.CreateNIC(nicID, o.linkID); err != nil {
 		return errors.New("Unable to create TCP NIC: %v", err)
 	}
-	if aErr := o.stack.AddAddress(nicID, o.p.proto, ipAddr); aErr != nil {
+	if aErr := o.stack.AddAddress(nicID, o.p.proto, o.ipAddr); aErr != nil {
 		return errors.New("Unable to assign NIC IP address: %v", aErr)
 	}
 
