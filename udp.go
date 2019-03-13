@@ -44,7 +44,7 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 	downstreamIPAddr := tcpip.Address(net.ParseIP(ft.src.ip).To4())
 
 	conn := &udpConn{
-		origin: *newOrigin(p, ft.dst, func(o *origin) error {
+		origin: *newOrigin(p, ft.dst, upstream, func(o *origin) error {
 			p.udpConnsMx.Lock()
 			delete(p.udpConns, ft)
 			p.udpConnsMx.Unlock()
@@ -52,8 +52,6 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 		}),
 		ft: ft,
 	}
-	conn.upstream = upstream
-	conn.markActive()
 
 	if err := conn.init(udp.ProtocolNumber, tcpip.FullAddress{nicID, "", ft.dst.port}); err != nil {
 		conn.closeNow()

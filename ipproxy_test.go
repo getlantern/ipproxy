@@ -96,8 +96,8 @@ func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw 
 		stacklen := runtime.Stack(buf, true)
 		goroutines := string(buf[:stacklen])
 		assert.False(t, strings.Contains(goroutines, "echoReplier"), goroutines)
-		// assert.False(t, strings.Contains(goroutines, "copyTo"), goroutines)
-		// assert.False(t, strings.Contains(goroutines, "copyFrom"), goroutines)
+		assert.False(t, strings.Contains(goroutines, "copyTo"), goroutines)
+		assert.False(t, strings.Contains(goroutines, "copyFrom"), goroutines)
 	}()
 
 	atomic.StoreInt64(&serverTCPConnections, 0)

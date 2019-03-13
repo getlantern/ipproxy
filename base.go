@@ -73,6 +73,8 @@ func newBaseConn(p *proxy, upstream io.ReadWriteCloser, wq *waiter.Queue, finali
 		return
 	}
 
+	conn.markActive()
+
 	return conn
 }
 
@@ -169,14 +171,13 @@ func (conn *baseConn) timeSinceLastActive() time.Duration {
 	return time.Duration(time.Now().UnixNano() - atomic.LoadInt64(&conn.lastActive))
 }
 
-func newOrigin(p *proxy, addr addr, finalizer func(o *origin) error) *origin {
+func newOrigin(p *proxy, addr addr, upstream io.ReadWriteCloser, finalizer func(o *origin) error) *origin {
 	linkID, channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
 	s := stack.New([]string{ipv4.ProtocolName}, []string{tcp.ProtocolName, udp.ProtocolName}, stack.Options{})
 
 	ipAddr := tcpip.Address(net.ParseIP(addr.ip).To4())
 
 	o := &origin{
-		baseConn:        newBaseConn(p, nil, &waiter.Queue{}, nil),
 		addr:            addr,
 		ipAddr:          ipAddr,
 		stack:           s,
@@ -184,13 +185,13 @@ func newOrigin(p *proxy, addr addr, finalizer func(o *origin) error) *origin {
 		channelEndpoint: channelEndpoint,
 		clients:         make(map[tcpip.FullAddress]*baseConn),
 	}
-	o.finalizer = func() (err error) {
+	o.baseConn = newBaseConn(p, upstream, &waiter.Queue{}, func() (err error) {
 		s.Close()
 		if finalizer != nil {
 			err = finalizer(o)
 		}
 		return
-	}
+	})
 
 	go o.copyToDownstream()
 	return o

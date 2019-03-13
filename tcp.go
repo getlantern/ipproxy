@@ -32,7 +32,7 @@ func (p *proxy) onTCP(pkt ipPacket) {
 }
 
 func (p *proxy) createTCPOrigin(dstAddr addr) (*origin, error) {
-	o := newOrigin(p, dstAddr, func(o *origin) error {
+	o := newOrigin(p, dstAddr, nil, func(o *origin) error {
 		p.tcpOriginsMx.Lock()
 		delete(p.tcpOrigins, dstAddr)
 		o.clientsMx.Lock()
@@ -47,7 +47,6 @@ func (p *proxy) createTCPOrigin(dstAddr addr) (*origin, error) {
 		p.tcpOriginsMx.Unlock()
 		return nil
 	})
-	o.markActive()
 
 	if err := o.init(tcp.ProtocolNumber, tcpip.FullAddress{nicID, o.ipAddr, dstAddr.port}); err != nil {
 		o.closeNow()
@@ -104,7 +103,6 @@ func (o *origin) onAccept(acceptedEp tcpip.Endpoint, wq *waiter.Queue) {
 	tcpConn.ep = acceptedEp
 	go tcpConn.copyToUpstream(nil)
 	go tcpConn.copyFromUpstream(tcpip.WriteOptions{})
-	tcpConn.markActive()
 	o.addClient(downstreamAddr, &tcpConn)
 }
 
