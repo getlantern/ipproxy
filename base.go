@@ -29,7 +29,6 @@ type baseConn struct {
 	lastActive int64
 	p          *proxy
 	upstream   io.ReadWriteCloser
-	finalizer  func() error
 	ep         tcpip.Endpoint
 	wq         *waiter.Queue
 	waitEntry  *waiter.Entry
@@ -39,32 +38,46 @@ type baseConn struct {
 }
 
 func newBaseConn(p *proxy, upstream io.ReadWriteCloser, wq *waiter.Queue, finalizer func() error) baseConn {
-	if finalizer == nil {
-		finalizer = func() error { return nil }
-	}
-
 	waitEntry, notifyCh := waiter.NewChannelEntry(nil)
 	wq.EventRegister(&waitEntry, waiter.EventIn)
 
-	return baseConn{
+	conn := baseConn{
 		p:         p,
 		upstream:  upstream,
-		finalizer: finalizer,
 		wq:        wq,
 		waitEntry: &waitEntry,
 		notifyCh:  notifyCh,
 		closeable: closeable{
-			closeCh:  make(chan struct{}),
-			closedCh: make(chan error),
+			closeCh:           make(chan struct{}),
+			readyToFinalizeCh: make(chan struct{}),
+			closedCh:          make(chan struct{}),
 		},
 	}
+
+	conn.finalizer = func() (err error) {
+		if finalizer != nil {
+			err = finalizer()
+		}
+		if conn.upstream != nil {
+			_err := conn.upstream.Close()
+			if err == nil {
+				err = _err
+			}
+		}
+
+		conn.wq.EventUnregister(conn.waitEntry)
+		if conn.ep != nil {
+			conn.ep.Close()
+		}
+
+		return
+	}
+
+	return conn
 }
 
 func (conn *baseConn) copyToUpstream(readAddr *tcpip.FullAddress) {
-	defer func() {
-		conn.closedCh <- conn.finalize()
-		close(conn.closedCh)
-	}()
+	defer conn.closeNow()
 
 	for {
 		buf, _, readErr := conn.ep.Read(readAddr)
@@ -87,6 +100,13 @@ func (conn *baseConn) copyToUpstream(readAddr *tcpip.FullAddress) {
 			return
 		}
 		conn.markActive()
+
+		select {
+		case <-conn.closeCh:
+			return
+		default:
+			// keep processing
+		}
 	}
 }
 
@@ -149,38 +169,14 @@ func (conn *baseConn) timeSinceLastActive() time.Duration {
 	return time.Duration(time.Now().UnixNano() - atomic.LoadInt64(&conn.lastActive))
 }
 
-func (conn *baseConn) finalize() error {
-	err := conn.finalizer()
-	if conn.upstream != nil {
-		_err := conn.upstream.Close()
-		if err == nil {
-			err = _err
-		}
-	}
-
-	conn.wq.EventUnregister(conn.waitEntry)
-	if conn.ep != nil {
-		conn.ep.Close()
-	}
-
-	return err
-}
-
-func newOrigin(p *proxy, addr addr, finalizer func() error) *origin {
+func newOrigin(p *proxy, addr addr, finalizer func(o *origin) error) *origin {
 	linkID, channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
 	s := stack.New([]string{ipv4.ProtocolName}, []string{tcp.ProtocolName, udp.ProtocolName}, stack.Options{})
 
 	ipAddr := tcpip.Address(net.ParseIP(addr.ip).To4())
-	fullFinalizer := func() (err error) {
-		s.Close()
-		if finalizer != nil {
-			err = finalizer()
-		}
-		return
-	}
 
 	o := &origin{
-		baseConn:        newBaseConn(p, nil, &waiter.Queue{}, fullFinalizer),
+		baseConn:        newBaseConn(p, nil, &waiter.Queue{}, nil),
 		addr:            addr,
 		ipAddr:          ipAddr,
 		stack:           s,
@@ -188,6 +184,14 @@ func newOrigin(p *proxy, addr addr, finalizer func() error) *origin {
 		channelEndpoint: channelEndpoint,
 		clients:         make(map[tcpip.FullAddress]*baseConn),
 	}
+	o.finalizer = func() (err error) {
+		s.Close()
+		if finalizer != nil {
+			err = finalizer(o)
+		}
+		return
+	}
+
 	go o.copyToDownstream()
 	return o
 }
@@ -232,7 +236,6 @@ func (o *origin) init(transportProtocol tcpip.TransportProtocolNumber, bindAddr 
 	}
 
 	if err := o.ep.Bind(bindAddr); err != nil {
-		o.finalize()
 		return errors.New("Bind failed: %v", err)
 	}
 

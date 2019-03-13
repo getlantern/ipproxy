@@ -17,7 +17,6 @@ func (p *proxy) onTCP(pkt ipPacket) {
 	dstAddr := pkt.ft().dst
 	p.tcpOriginsMx.Lock()
 	o := p.tcpOrigins[dstAddr]
-	p.tcpOriginsMx.Unlock()
 	if o == nil {
 		var err error
 		o, err = p.createTCPOrigin(dstAddr)
@@ -25,30 +24,42 @@ func (p *proxy) onTCP(pkt ipPacket) {
 			log.Error(err)
 			return
 		}
-		p.tcpOriginsMx.Lock()
 		p.tcpOrigins[dstAddr] = o
-		p.tcpOriginsMx.Unlock()
 	}
+	p.tcpOriginsMx.Unlock()
 
 	o.channelEndpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
 }
 
 func (p *proxy) createTCPOrigin(dstAddr addr) (*origin, error) {
-	o := newOrigin(p, dstAddr, func() error {
-		p.removeTCPOrigin(dstAddr)
+	o := newOrigin(p, dstAddr, func(o *origin) error {
+		p.tcpOriginsMx.Lock()
+		delete(p.tcpOrigins, dstAddr)
+		o.clientsMx.Lock()
+		clients := make([]*baseConn, 0, len(o.clients))
+		for _, client := range o.clients {
+			clients = append(clients, client)
+		}
+		o.clientsMx.Unlock()
+		for _, client := range o.clients {
+			client.closeNow()
+		}
+		p.tcpOriginsMx.Unlock()
 		return nil
 	})
 	o.markActive()
 
 	if err := o.init(tcp.ProtocolNumber, tcpip.FullAddress{nicID, o.ipAddr, dstAddr.port}); err != nil {
+		o.closeNow()
 		return nil, errors.New("Unable to initialize TCP origin: %v", err)
 	}
 	if pErr := o.stack.SetPromiscuousMode(nicID, true); pErr != nil {
+		o.closeNow()
 		return nil, errors.New("Unable to set NIC to promiscuous mode: %v", pErr)
 	}
 
 	if err := o.ep.Listen(p.opts.TCPConnectBacklog); err != nil {
-		o.finalize()
+		o.closeNow()
 		return nil, errors.New("Unable to listen for TCP connections: %v", err)
 	}
 
@@ -57,10 +68,7 @@ func (p *proxy) createTCPOrigin(dstAddr addr) (*origin, error) {
 }
 
 func acceptTCP(o *origin) {
-	defer func() {
-		o.closedCh <- o.finalize()
-		close(o.closedCh)
-	}()
+	defer o.closeNow()
 
 	for {
 		acceptedEp, wq, err := o.ep.Accept()
@@ -85,7 +93,6 @@ func (o *origin) onAccept(acceptedEp tcpip.Endpoint, wq *waiter.Queue) {
 	upstream, dialErr := o.p.opts.DialTCP(context.Background(), "tcp", o.addr.String())
 	if dialErr != nil {
 		log.Errorf("Unexpected error dialing upstream to %v: %v", o.addr, dialErr)
-		o.Close()
 		return
 	}
 
@@ -99,12 +106,6 @@ func (o *origin) onAccept(acceptedEp tcpip.Endpoint, wq *waiter.Queue) {
 	go tcpConn.copyFromUpstream(tcpip.WriteOptions{})
 	tcpConn.markActive()
 	o.addClient(downstreamAddr, &tcpConn)
-}
-
-func (p *proxy) removeTCPOrigin(dstAddr addr) {
-	p.tcpOriginsMx.Lock()
-	delete(p.tcpOrigins, dstAddr)
-	p.tcpOriginsMx.Unlock()
 }
 
 // reapUDP reaps idled TCP connections and origins. We do this on a single
@@ -124,7 +125,7 @@ func (p *proxy) reapTCP() {
 			}
 			p.tcpOriginsMx.Unlock()
 
-			for a, o := range origins {
+			for _, o := range origins {
 				o.clientsMx.Lock()
 				conns := make([]*baseConn, 0, len(o.clients))
 				for _, conn := range o.clients {
@@ -134,12 +135,11 @@ func (p *proxy) reapTCP() {
 				if len(conns) > 0 {
 					for _, conn := range conns {
 						if conn.timeSinceLastActive() > p.opts.IdleTimeout {
-							go conn.Close()
+							go conn.closeNow()
 						}
 					}
 				} else if o.timeSinceLastActive() > p.opts.IdleTimeout {
-					o.p.removeTCPOrigin(a)
-					go o.Close()
+					go o.closeNow()
 				}
 			}
 		}
@@ -155,23 +155,7 @@ func (p *proxy) finalizeTCP() (err error) {
 	p.tcpOriginsMx.Unlock()
 
 	for _, o := range origins {
-		o.clientsMx.Lock()
-		conns := make([]*baseConn, 0, len(o.clients))
-		for _, conn := range o.clients {
-			conns = append(conns, conn)
-		}
-		o.clientsMx.Unlock()
-
-		for _, conn := range conns {
-			if conn.timeSinceLastActive() > p.opts.IdleTimeout {
-				_err := conn.Close()
-				if err == nil {
-					err = _err
-				}
-			}
-		}
-
-		_err := o.Close()
+		_err := o.closeNow()
 		if err == nil {
 			err = _err
 		}

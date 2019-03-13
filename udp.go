@@ -44,7 +44,7 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 	downstreamIPAddr := tcpip.Address(net.ParseIP(ft.src.ip).To4())
 
 	conn := &udpConn{
-		origin: *newOrigin(p, ft.dst, func() error {
+		origin: *newOrigin(p, ft.dst, func(o *origin) error {
 			p.udpConnsMx.Lock()
 			delete(p.udpConns, ft)
 			p.udpConnsMx.Unlock()
@@ -56,6 +56,7 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 	conn.markActive()
 
 	if err := conn.init(udp.ProtocolNumber, tcpip.FullAddress{nicID, "", ft.dst.port}); err != nil {
+		conn.closeNow()
 		return nil, errors.New("Unable to initialize UDP connection for %v: %v", ft, err)
 	}
 
@@ -103,7 +104,7 @@ func (p *proxy) reapUDP() {
 			p.udpConnsMx.Unlock()
 			for _, conn := range conns {
 				if conn.timeSinceLastActive() > p.opts.IdleTimeout {
-					go conn.Close()
+					go conn.closeNow()
 				}
 			}
 		}

@@ -72,8 +72,10 @@ func TestCloseCleanup(t *testing.T) {
 			assert.Equal(t, 1, numTCPOrigins, "TCP origin should not be purged before idle timeout")
 			assert.Equal(t, 1, numTCPClients, "TCP client should not be purged before idle timeout")
 			assert.Equal(t, 1, numUDPConns, "UDP conns should not be purged before idle timeout")
+			log.Debug("Closing device")
 			err := dev.Close()
 			if assert.NoError(t, err) {
+				log.Debug("Closing proxy")
 				err = p.Close()
 				if assert.NoError(t, err) {
 					log.Debug("Checking")

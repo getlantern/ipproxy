@@ -149,23 +149,26 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		udpConns:     make(map[fourtuple]*udpConn, 0),
 		toDownstream: make(chan channel.PacketInfo),
 		closeable: closeable{
-			closeCh:  make(chan struct{}),
-			closedCh: make(chan error),
+			closeCh:           make(chan struct{}),
+			readyToFinalizeCh: make(chan struct{}),
+			closedCh:          make(chan struct{}),
 		},
+	}
+
+	p.finalizer = func() error {
+		err := p.finalizeTCP()
+		_err := p.finalizeUDP()
+		if err == nil {
+			err = _err
+		}
+		return err
 	}
 
 	return p, nil
 }
 
 func (p *proxy) copyToUpstream() (finalErr error) {
-	defer func() {
-		go func() {
-			err := p.finalize()
-			p.closedCh <- err
-			close(p.closedCh)
-		}()
-		finalErr = p.Close()
-	}()
+	defer p.closeNow()
 
 	for {
 		// we can't reuse this byte slice across reads because each one is held in
@@ -201,6 +204,8 @@ func (p *proxy) copyToUpstream() (finalErr error) {
 }
 
 func (p *proxy) copyFromUpstream() {
+	defer p.Close()
+
 	for {
 		select {
 		case <-p.closedCh:
@@ -216,13 +221,4 @@ func (p *proxy) copyFromUpstream() {
 			}
 		}
 	}
-}
-
-func (p *proxy) finalize() error {
-	err := p.finalizeTCP()
-	_err := p.finalizeUDP()
-	if err == nil {
-		err = _err
-	}
-	return err
 }
