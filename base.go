@@ -191,6 +191,7 @@ func newOrigin(p *proxy, addr addr, upstream io.ReadWriteCloser, finalizer func(
 		if finalizer != nil {
 			err = finalizer(o)
 		}
+		channelEndpoint.Drain()
 		return
 	})
 
