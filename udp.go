@@ -88,17 +88,23 @@ type udpConn struct {
 // reapUDP reaps idled UDP connections. We do this on a single goroutine to
 // avoid creating a bunch of timers for each connection (which is expensive).
 func (p *proxy) reapUDP() {
+	ticker := time.NewTicker(1 * time.Second)
 	for {
-		time.Sleep(1 * time.Second)
-		p.udpConnsMx.Lock()
-		conns := make([]*udpConn, 0, len(p.udpConns))
-		for _, conn := range p.udpConns {
-			conns = append(conns, conn)
-		}
-		p.udpConnsMx.Unlock()
-		for _, conn := range conns {
-			if conn.timeSinceLastActive() > p.opts.IdleTimeout {
-				go conn.Close()
+		select {
+		case <-p.closeCh:
+			return
+		case <-ticker.C:
+			time.Sleep(1 * time.Second)
+			p.udpConnsMx.Lock()
+			conns := make([]*udpConn, 0, len(p.udpConns))
+			for _, conn := range p.udpConns {
+				conns = append(conns, conn)
+			}
+			p.udpConnsMx.Unlock()
+			for _, conn := range conns {
+				if conn.timeSinceLastActive() > p.opts.IdleTimeout {
+					go conn.Close()
+				}
 			}
 		}
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"net"
+	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -87,6 +89,15 @@ func TestCloseCleanup(t *testing.T) {
 }
 
 func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw string, afterUDP func(Proxy, net.Conn, []byte), afterTCP func(Proxy, net.Conn, []byte), finish func(Proxy, io.Closer)) {
+	defer func() {
+		buf := make([]byte, 1<<20)
+		stacklen := runtime.Stack(buf, true)
+		goroutines := string(buf[:stacklen])
+		assert.False(t, strings.Contains(goroutines, "echoReplier"), goroutines)
+		// assert.False(t, strings.Contains(goroutines, "copyTo"), goroutines)
+		// assert.False(t, strings.Contains(goroutines, "copyFrom"), goroutines)
+	}()
+
 	atomic.StoreInt64(&serverTCPConnections, 0)
 	ip := "127.0.0.1"
 

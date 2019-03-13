@@ -172,9 +172,7 @@ func newOrigin(p *proxy, addr addr, finalizer func() error) *origin {
 
 	ipAddr := tcpip.Address(net.ParseIP(addr.ip).To4())
 	fullFinalizer := func() (err error) {
-		if ipErr := s.RemoveAddress(nicID, ipAddr); ipErr != nil {
-			err = errors.New(ipErr.String())
-		}
+		s.Close()
 		if finalizer != nil {
 			err = finalizer()
 		}
@@ -211,7 +209,11 @@ func (o *origin) copyToDownstream() {
 		case <-o.closedCh:
 			return
 		case pktInfo := <-o.channelEndpoint.C:
-			o.p.toDownstream <- pktInfo
+			select {
+			case <-o.closedCh:
+				return
+			case o.p.toDownstream <- pktInfo:
+			}
 		}
 	}
 }

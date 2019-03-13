@@ -111,31 +111,36 @@ func (p *proxy) removeTCPOrigin(dstAddr addr) {
 // goroutine to avoid creating a bunch of timers for each connection
 // (which is expensive).
 func (p *proxy) reapTCP() {
+	ticker := time.NewTicker(1 * time.Second)
 	for {
-		time.Sleep(1 * time.Second)
-		p.tcpOriginsMx.Lock()
-		origins := make(map[addr]*origin, len(p.tcpOrigins))
-		for a, o := range p.tcpOrigins {
-			origins[a] = o
-		}
-		p.tcpOriginsMx.Unlock()
-
-		for a, o := range origins {
-			o.clientsMx.Lock()
-			conns := make([]*baseConn, 0, len(o.clients))
-			for _, conn := range o.clients {
-				conns = append(conns, conn)
+		select {
+		case <-p.closeCh:
+			return
+		case <-ticker.C:
+			p.tcpOriginsMx.Lock()
+			origins := make(map[addr]*origin, len(p.tcpOrigins))
+			for a, o := range p.tcpOrigins {
+				origins[a] = o
 			}
-			o.clientsMx.Unlock()
-			if len(conns) > 0 {
-				for _, conn := range conns {
-					if conn.timeSinceLastActive() > p.opts.IdleTimeout {
-						go conn.Close()
-					}
+			p.tcpOriginsMx.Unlock()
+
+			for a, o := range origins {
+				o.clientsMx.Lock()
+				conns := make([]*baseConn, 0, len(o.clients))
+				for _, conn := range o.clients {
+					conns = append(conns, conn)
 				}
-			} else if o.timeSinceLastActive() > p.opts.IdleTimeout {
-				o.p.removeTCPOrigin(a)
-				go o.Close()
+				o.clientsMx.Unlock()
+				if len(conns) > 0 {
+					for _, conn := range conns {
+						if conn.timeSinceLastActive() > p.opts.IdleTimeout {
+							go conn.Close()
+						}
+					}
+				} else if o.timeSinceLastActive() > p.opts.IdleTimeout {
+					o.p.removeTCPOrigin(a)
+					go o.Close()
+				}
 			}
 		}
 	}
