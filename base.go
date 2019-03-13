@@ -191,7 +191,11 @@ func newOrigin(p *proxy, addr addr, upstream io.ReadWriteCloser, finalizer func(
 		if finalizer != nil {
 			err = finalizer(o)
 		}
-		channelEndpoint.Drain()
+		for _, ep := range tcpip.GetDanglingEndpoints() {
+			ep.Close()
+			tcpip.DeleteDanglingEndpoint(ep)
+		}
+		o.channelEndpoint.Drain()
 		return
 	})
 

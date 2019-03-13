@@ -1,13 +1,17 @@
 package ipproxy
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
 	"runtime"
+	"runtime/pprof"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/google/netstack/tcpip"
 
 	"github.com/getlantern/fdcount"
 	"github.com/getlantern/gotun"
@@ -91,6 +95,8 @@ func TestCloseCleanup(t *testing.T) {
 
 func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw string, afterUDP func(Proxy, net.Conn, []byte), afterTCP func(Proxy, net.Conn, []byte), finish func(Proxy, io.Closer)) {
 	defer func() {
+		time.Sleep(2 * time.Second)
+
 		buf := make([]byte, 1<<20)
 		stacklen := runtime.Stack(buf, true)
 		goroutines := string(buf[:stacklen])
@@ -98,6 +104,15 @@ func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw 
 		assert.NotContains(t, goroutines, "echoReplier", "all echo repliers should have stopped")
 		assert.NotContains(t, goroutines, "copyTo", "all copyTo goroutines should have stopped")
 		assert.NotContains(t, goroutines, "copyFrom", "all copyFrom goroutines should have stopped")
+
+		runtime.GC()
+		prof := pprof.Lookup("heap")
+		profBuf := bytes.NewBuffer(nil)
+		prof.WriteTo(profBuf, 2)
+		profString := profBuf.String()
+		if !assert.NotContains(t, profString, "netstack", "no netstack objects should remain in use") {
+			log.Debugf("Number of dangling endpoints: %d", len(tcpip.GetDanglingEndpoints()))
+		}
 	}()
 
 	atomic.StoreInt64(&serverTCPConnections, 0)
