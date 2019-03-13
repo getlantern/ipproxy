@@ -37,11 +37,11 @@ type baseConn struct {
 	closeable
 }
 
-func newBaseConn(p *proxy, upstream io.ReadWriteCloser, wq *waiter.Queue, finalizer func() error) baseConn {
+func newBaseConn(p *proxy, upstream io.ReadWriteCloser, wq *waiter.Queue, finalizer func() error) *baseConn {
 	waitEntry, notifyCh := waiter.NewChannelEntry(nil)
 	wq.EventRegister(&waitEntry, waiter.EventIn)
 
-	conn := baseConn{
+	conn := &baseConn{
 		p:         p,
 		upstream:  upstream,
 		wq:        wq,
@@ -58,6 +58,7 @@ func newBaseConn(p *proxy, upstream io.ReadWriteCloser, wq *waiter.Queue, finali
 		if finalizer != nil {
 			err = finalizer()
 		}
+
 		if conn.upstream != nil {
 			_err := conn.upstream.Close()
 			if err == nil {
@@ -198,7 +199,7 @@ func newOrigin(p *proxy, addr addr, upstream io.ReadWriteCloser, finalizer func(
 }
 
 type origin struct {
-	baseConn
+	*baseConn
 	addr            addr
 	ipAddr          tcpip.Address
 	stack           *stack.Stack

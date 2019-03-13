@@ -103,7 +103,7 @@ func (o *origin) onAccept(acceptedEp tcpip.Endpoint, wq *waiter.Queue) {
 	tcpConn.ep = acceptedEp
 	go tcpConn.copyToUpstream(nil)
 	go tcpConn.copyFromUpstream(tcpip.WriteOptions{})
-	o.addClient(downstreamAddr, &tcpConn)
+	o.addClient(downstreamAddr, tcpConn)
 }
 
 // reapUDP reaps idled TCP connections and origins. We do this on a single

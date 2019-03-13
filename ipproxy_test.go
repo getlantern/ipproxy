@@ -5,7 +5,6 @@ import (
 	"io"
 	"net"
 	"runtime"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -95,9 +94,10 @@ func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw 
 		buf := make([]byte, 1<<20)
 		stacklen := runtime.Stack(buf, true)
 		goroutines := string(buf[:stacklen])
-		assert.False(t, strings.Contains(goroutines, "echoReplier"), goroutines)
-		assert.False(t, strings.Contains(goroutines, "copyTo"), goroutines)
-		assert.False(t, strings.Contains(goroutines, "copyFrom"), goroutines)
+		assert.NotContains(t, goroutines, "tcp.(*endpoint).Listen", "tcp listeners should have stopped")
+		assert.NotContains(t, goroutines, "echoReplier", "all echo repliers should have stopped")
+		assert.NotContains(t, goroutines, "copyTo", "all copyTo goroutines should have stopped")
+		assert.NotContains(t, goroutines, "copyFrom", "all copyFrom goroutines should have stopped")
 	}()
 
 	atomic.StoreInt64(&serverTCPConnections, 0)
