@@ -35,6 +35,7 @@ func (p *proxy) createTCPOrigin(dstAddr addr) (*origin, error) {
 	o := newOrigin(p, tcp.ProtocolName, dstAddr, nil, func(o *origin) error {
 		p.tcpOriginsMx.Lock()
 		delete(p.tcpOrigins, dstAddr)
+		p.tcpOriginsMx.Unlock()
 		o.clientsMx.Lock()
 		clients := make([]*baseConn, 0, len(o.clients))
 		for _, client := range o.clients {
@@ -44,7 +45,6 @@ func (p *proxy) createTCPOrigin(dstAddr addr) (*origin, error) {
 		for _, client := range o.clients {
 			client.closeNow()
 		}
-		p.tcpOriginsMx.Unlock()
 		return nil
 	})
 

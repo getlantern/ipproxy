@@ -45,11 +45,9 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 
 	conn := &udpConn{
 		origin: *newOrigin(p, udp.ProtocolName, ft.dst, upstream, func(o *origin) error {
-			log.Debug("udpConn.finalize")
 			p.udpConnsMx.Lock()
 			delete(p.udpConns, ft)
 			p.udpConnsMx.Unlock()
-			log.Debug("udpConn.finalize done")
 			return nil
 		}),
 		ft: ft,

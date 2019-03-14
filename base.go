@@ -53,27 +53,22 @@ func newBaseConn(p *proxy, upstream io.ReadWriteCloser, wq *waiter.Queue, finali
 	}
 
 	conn.finalizer = func() (err error) {
-		log.Debug("baseConn.finalize")
 		if finalizer != nil {
 			err = finalizer()
 		}
 
 		if conn.upstream != nil {
-			log.Debug("baseConn.closeUpstream")
 			_err := conn.upstream.Close()
 			if err == nil {
 				err = _err
 			}
 		}
 
-		log.Debug("baseConn.eventUnregister")
 		conn.wq.EventUnregister(conn.waitEntry)
 		if conn.ep != nil {
-			log.Debug("baseConn.closeEP")
 			conn.ep.Close()
 		}
 
-		log.Debug("baseConn.finalize done")
 		return
 	}
 
@@ -87,6 +82,13 @@ func (conn *baseConn) copyToUpstream(readAddr *tcpip.FullAddress) {
 
 	for {
 		buf, _, readErr := conn.ep.Read(readAddr)
+		if len(buf) > 0 {
+			if _, writeErr := conn.upstream.Write(buf); writeErr != nil {
+				log.Errorf("Unexpected error writing to upstream: %v", writeErr)
+				return
+			}
+		}
+
 		if readErr != nil {
 			if readErr == tcpip.ErrWouldBlock {
 				select {
@@ -101,10 +103,7 @@ func (conn *baseConn) copyToUpstream(readAddr *tcpip.FullAddress) {
 			}
 			return
 		}
-		if _, writeErr := conn.upstream.Write(buf); writeErr != nil {
-			log.Errorf("Unexpected error writing to upstream: %v", writeErr)
-			return
-		}
+
 		conn.markActive()
 
 		select {
@@ -124,6 +123,15 @@ func (conn *baseConn) copyFromUpstream(responseOptions tcpip.WriteOptions) {
 		// memory by the tcpip stack.
 		b := make([]byte, conn.p.opts.MTU-tcpipHeaderBytes) // leave room for tcpip header that gets added later
 		n, readErr := conn.upstream.Read(b)
+
+		if n > 0 {
+			writeErr := conn.writeToDownstream(b[:n], responseOptions)
+			if writeErr != nil {
+				log.Errorf("Unexpected error writing to downstream: %v", writeErr)
+				return
+			}
+		}
+
 		if readErr != nil {
 			if readErr != io.EOF && !strings.Contains(readErr.Error(), "use of closed network connection") {
 				log.Errorf("Unexpected error reading from upstream: %v", readErr)
@@ -131,11 +139,6 @@ func (conn *baseConn) copyFromUpstream(responseOptions tcpip.WriteOptions) {
 			return
 		}
 
-		writeErr := conn.writeToDownstream(b[:n], responseOptions)
-		if writeErr != nil {
-			log.Errorf("Unexpected error writing to downstream: %v", writeErr)
-			return
-		}
 		conn.markActive()
 	}
 }
@@ -190,18 +193,14 @@ func newOrigin(p *proxy, transportProtocolName string, addr addr, upstream io.Re
 		clients:         make(map[tcpip.FullAddress]*baseConn),
 	}
 	o.baseConn = newBaseConn(p, upstream, &waiter.Queue{}, func() (err error) {
-		log.Debug("origin.finalize")
 		if finalizer != nil {
 			err = finalizer(o)
 		}
-		log.Debug("origin.closeStack")
 		s.Close()
 		for _, ep := range tcpip.GetDanglingEndpoints() {
-			log.Debug("origin.closeDangling")
 			ep.Close()
 			tcpip.DeleteDanglingEndpoint(ep)
 		}
-		log.Debug("origin.finalize done")
 		return
 	})
 
