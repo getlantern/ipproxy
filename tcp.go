@@ -11,6 +11,7 @@ import (
 	"github.com/google/netstack/waiter"
 
 	"github.com/getlantern/errors"
+	"github.com/getlantern/eventual"
 )
 
 func (p *proxy) onTCP(pkt ipPacket) {
@@ -95,8 +96,11 @@ func (o *origin) onAccept(acceptedEp tcpip.Endpoint, wq *waiter.Queue) {
 		return
 	}
 
+	upstreamValue := eventual.NewValue()
+	upstreamValue.Set(upstream)
+
 	downstreamAddr, _ := acceptedEp.GetRemoteAddress()
-	tcpConn := newBaseConn(o.p, upstream, wq, func() error {
+	tcpConn := newBaseConn(o.p, upstreamValue, wq, func() error {
 		o.removeClient(downstreamAddr)
 		return nil
 	})

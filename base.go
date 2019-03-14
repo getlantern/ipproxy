@@ -15,6 +15,7 @@ import (
 	"github.com/google/netstack/waiter"
 
 	"github.com/getlantern/errors"
+	"github.com/getlantern/eventual"
 )
 
 const (
@@ -26,7 +27,7 @@ const (
 type baseConn struct {
 	lastActive int64
 	p          *proxy
-	upstream   io.ReadWriteCloser
+	upstream   eventual.Value
 	ep         tcpip.Endpoint
 	wq         *waiter.Queue
 	waitEntry  *waiter.Entry
@@ -35,7 +36,7 @@ type baseConn struct {
 	closeable
 }
 
-func newBaseConn(p *proxy, upstream io.ReadWriteCloser, wq *waiter.Queue, finalizer func() error) *baseConn {
+func newBaseConn(p *proxy, upstream eventual.Value, wq *waiter.Queue, finalizer func() error) *baseConn {
 	waitEntry, notifyCh := waiter.NewChannelEntry(nil)
 	wq.EventRegister(&waitEntry, waiter.EventIn)
 
@@ -57,8 +58,9 @@ func newBaseConn(p *proxy, upstream io.ReadWriteCloser, wq *waiter.Queue, finali
 			err = finalizer()
 		}
 
-		if conn.upstream != nil {
-			_err := conn.upstream.Close()
+		upstream := conn.getUpstream(0)
+		if upstream != nil {
+			_err := upstream.Close()
 			if err == nil {
 				err = _err
 			}
@@ -77,13 +79,29 @@ func newBaseConn(p *proxy, upstream io.ReadWriteCloser, wq *waiter.Queue, finali
 	return conn
 }
 
+func (conn *baseConn) getUpstream(timeout time.Duration) io.ReadWriteCloser {
+	if conn.upstream == nil {
+		return nil
+	}
+	upstream, ok := conn.upstream.Get(timeout)
+	if !ok {
+		return nil
+	}
+	return upstream.(io.ReadWriteCloser)
+}
+
 func (conn *baseConn) copyToUpstream(readAddr *tcpip.FullAddress) {
 	defer conn.closeNow()
+
+	upstream := conn.getUpstream(conn.p.opts.IdleTimeout)
+	if upstream == nil {
+		return
+	}
 
 	for {
 		buf, _, readErr := conn.ep.Read(readAddr)
 		if len(buf) > 0 {
-			if _, writeErr := conn.upstream.Write(buf); writeErr != nil {
+			if _, writeErr := upstream.Write(buf); writeErr != nil {
 				log.Errorf("Unexpected error writing to upstream: %v", writeErr)
 				return
 			}
@@ -118,11 +136,16 @@ func (conn *baseConn) copyToUpstream(readAddr *tcpip.FullAddress) {
 func (conn *baseConn) copyFromUpstream(responseOptions tcpip.WriteOptions) {
 	defer conn.Close()
 
+	upstream := conn.getUpstream(conn.p.opts.IdleTimeout)
+	if upstream == nil {
+		return
+	}
+
 	for {
 		// we can't reuse this byte slice across reads because each one is held in
 		// memory by the tcpip stack.
 		b := make([]byte, conn.p.opts.MTU-tcpipHeaderBytes) // leave room for tcpip header that gets added later
-		n, readErr := conn.upstream.Read(b)
+		n, readErr := upstream.Read(b)
 
 		if n > 0 {
 			writeErr := conn.writeToDownstream(b[:n], responseOptions)
@@ -178,7 +201,7 @@ func (conn *baseConn) timeSinceLastActive() time.Duration {
 	return time.Duration(time.Now().UnixNano() - atomic.LoadInt64(&conn.lastActive))
 }
 
-func newOrigin(p *proxy, transportProtocolName string, addr addr, upstream io.ReadWriteCloser, finalizer func(o *origin) error) *origin {
+func newOrigin(p *proxy, transportProtocolName string, addr addr, upstream eventual.Value, finalizer func(o *origin) error) *origin {
 	linkID, channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
 	s := stack.New([]string{ipv4.ProtocolName}, []string{transportProtocolName}, stack.Options{})
 

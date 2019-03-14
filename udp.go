@@ -12,6 +12,7 @@ import (
 	"github.com/google/netstack/tcpip/transport/udp"
 
 	"github.com/getlantern/errors"
+	"github.com/getlantern/eventual"
 )
 
 func (p *proxy) onUDP(pkt ipPacket) {
@@ -35,16 +36,11 @@ func (p *proxy) onUDP(pkt ipPacket) {
 }
 
 func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
-	upstreamAddr := fmt.Sprintf("%v:%d", ft.dst.ip, ft.dst.port)
-	upstream, err := p.opts.DialUDP(context.Background(), "udp", upstreamAddr)
-	if err != nil {
-		return nil, errors.New("Unable to dial upstream %v: %v", upstreamAddr, err)
-	}
-
+	upstreamValue := eventual.NewValue()
 	downstreamIPAddr := tcpip.Address(net.ParseIP(ft.src.ip).To4())
 
 	conn := &udpConn{
-		origin: *newOrigin(p, udp.ProtocolName, ft.dst, upstream, func(o *origin) error {
+		origin: *newOrigin(p, udp.ProtocolName, ft.dst, upstreamValue, func(o *origin) error {
 			p.udpConnsMx.Lock()
 			delete(p.udpConns, ft)
 			p.udpConnsMx.Unlock()
@@ -52,6 +48,17 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 		}),
 		ft: ft,
 	}
+
+	go func() {
+		upstreamAddr := fmt.Sprintf("%v:%d", ft.dst.ip, ft.dst.port)
+		upstream, err := p.opts.DialUDP(context.Background(), "udp", upstreamAddr)
+		if err != nil {
+			upstreamValue.Cancel()
+			conn.closeNow()
+			log.Errorf("Unable to dial upstream %v: %v", upstreamAddr, err)
+		}
+		upstreamValue.Set(upstream)
+	}()
 
 	if err := conn.init(udp.ProtocolNumber, tcpip.FullAddress{nicID, "", ft.dst.port}); err != nil {
 		conn.closeNow()
