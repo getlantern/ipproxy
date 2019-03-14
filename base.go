@@ -12,8 +12,6 @@ import (
 	"github.com/google/netstack/tcpip/link/channel"
 	"github.com/google/netstack/tcpip/network/ipv4"
 	"github.com/google/netstack/tcpip/stack"
-	"github.com/google/netstack/tcpip/transport/tcp"
-	"github.com/google/netstack/tcpip/transport/udp"
 	"github.com/google/netstack/waiter"
 
 	"github.com/getlantern/errors"
@@ -55,22 +53,27 @@ func newBaseConn(p *proxy, upstream io.ReadWriteCloser, wq *waiter.Queue, finali
 	}
 
 	conn.finalizer = func() (err error) {
+		log.Debug("baseConn.finalize")
 		if finalizer != nil {
 			err = finalizer()
 		}
 
 		if conn.upstream != nil {
+			log.Debug("baseConn.closeUpstream")
 			_err := conn.upstream.Close()
 			if err == nil {
 				err = _err
 			}
 		}
 
+		log.Debug("baseConn.eventUnregister")
 		conn.wq.EventUnregister(conn.waitEntry)
 		if conn.ep != nil {
+			log.Debug("baseConn.closeEP")
 			conn.ep.Close()
 		}
 
+		log.Debug("baseConn.finalize done")
 		return
 	}
 
@@ -172,9 +175,9 @@ func (conn *baseConn) timeSinceLastActive() time.Duration {
 	return time.Duration(time.Now().UnixNano() - atomic.LoadInt64(&conn.lastActive))
 }
 
-func newOrigin(p *proxy, addr addr, upstream io.ReadWriteCloser, finalizer func(o *origin) error) *origin {
+func newOrigin(p *proxy, transportProtocolName string, addr addr, upstream io.ReadWriteCloser, finalizer func(o *origin) error) *origin {
 	linkID, channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
-	s := stack.New([]string{ipv4.ProtocolName}, []string{tcp.ProtocolName, udp.ProtocolName}, stack.Options{})
+	s := stack.New([]string{ipv4.ProtocolName}, []string{transportProtocolName}, stack.Options{})
 
 	ipAddr := tcpip.Address(net.ParseIP(addr.ip).To4())
 
@@ -187,15 +190,18 @@ func newOrigin(p *proxy, addr addr, upstream io.ReadWriteCloser, finalizer func(
 		clients:         make(map[tcpip.FullAddress]*baseConn),
 	}
 	o.baseConn = newBaseConn(p, upstream, &waiter.Queue{}, func() (err error) {
-		s.Close()
+		log.Debug("origin.finalize")
 		if finalizer != nil {
 			err = finalizer(o)
 		}
+		log.Debug("origin.closeStack")
+		s.Close()
 		for _, ep := range tcpip.GetDanglingEndpoints() {
+			log.Debug("origin.closeDangling")
 			ep.Close()
 			tcpip.DeleteDanglingEndpoint(ep)
 		}
-		o.channelEndpoint.Drain()
+		log.Debug("origin.finalize done")
 		return
 	})
 

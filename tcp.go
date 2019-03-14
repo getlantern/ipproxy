@@ -32,7 +32,7 @@ func (p *proxy) onTCP(pkt ipPacket) {
 }
 
 func (p *proxy) createTCPOrigin(dstAddr addr) (*origin, error) {
-	o := newOrigin(p, dstAddr, nil, func(o *origin) error {
+	o := newOrigin(p, tcp.ProtocolName, dstAddr, nil, func(o *origin) error {
 		p.tcpOriginsMx.Lock()
 		delete(p.tcpOrigins, dstAddr)
 		o.clientsMx.Lock()
@@ -111,6 +111,8 @@ func (o *origin) onAccept(acceptedEp tcpip.Endpoint, wq *waiter.Queue) {
 // (which is expensive).
 func (p *proxy) reapTCP() {
 	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-p.closeCh:

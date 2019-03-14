@@ -7,6 +7,8 @@ import (
 
 func (p *proxy) trackStats() {
 	ticker := time.NewTicker(p.opts.StatsInterval)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-p.closeCh:

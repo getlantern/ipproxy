@@ -44,10 +44,12 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 	downstreamIPAddr := tcpip.Address(net.ParseIP(ft.src.ip).To4())
 
 	conn := &udpConn{
-		origin: *newOrigin(p, ft.dst, upstream, func(o *origin) error {
+		origin: *newOrigin(p, udp.ProtocolName, ft.dst, upstream, func(o *origin) error {
+			log.Debug("udpConn.finalize")
 			p.udpConnsMx.Lock()
 			delete(p.udpConns, ft)
 			p.udpConnsMx.Unlock()
+			log.Debug("udpConn.finalize done")
 			return nil
 		}),
 		ft: ft,
@@ -88,6 +90,8 @@ type udpConn struct {
 // avoid creating a bunch of timers for each connection (which is expensive).
 func (p *proxy) reapUDP() {
 	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-p.closeCh:
