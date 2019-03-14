@@ -10,8 +10,12 @@ import (
 	"time"
 
 	"github.com/google/netstack/tcpip"
+	"github.com/google/netstack/tcpip/buffer"
 	"github.com/google/netstack/tcpip/link/channel"
 	"github.com/google/netstack/tcpip/network/ipv4"
+	"github.com/google/netstack/tcpip/stack"
+	"github.com/google/netstack/tcpip/transport/tcp"
+	"github.com/google/netstack/tcpip/transport/udp"
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
@@ -28,8 +32,9 @@ const (
 	DefaultTCPConnectBacklog   = 10
 	DefaultStatsInterval       = 15 * time.Second
 
-	IPProtocolTCP = 6
-	IPProtocolUDP = 17
+	IPProtocolICMP = 1
+	IPProtocolTCP  = 6
+	IPProtocolUDP  = 17
 )
 
 type Opts struct {
@@ -130,11 +135,16 @@ type proxy struct {
 }
 
 func (p *proxy) Serve() error {
+	icmpStack, icmpEndpoint, err := p.stackForICMP()
+	if err != nil {
+		return err
+	}
+
 	go p.trackStats()
 	go p.reapTCP()
 	go p.reapUDP()
 	go p.copyFromUpstream()
-	return p.copyToUpstream()
+	return p.copyToUpstream(icmpStack, icmpEndpoint)
 }
 
 func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
@@ -167,8 +177,9 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 	return p, nil
 }
 
-func (p *proxy) copyToUpstream() (finalErr error) {
+func (p *proxy) copyToUpstream(icmpStack *stack.Stack, icmpEndpoint *channel.Endpoint) (finalErr error) {
 	defer p.closeNow()
+	defer icmpStack.Close()
 
 	for {
 		// we can't reuse this byte slice across reads because each one is held in
@@ -195,6 +206,9 @@ func (p *proxy) copyToUpstream() (finalErr error) {
 		case IPProtocolUDP:
 			p.acceptedPacket()
 			p.onUDP(pkt)
+		case IPProtocolICMP:
+			p.acceptedPacket()
+			icmpEndpoint.Inject(p.proto, buffer.View(pkt.raw).ToVectorisedView())
 		default:
 			p.rejectedPacket()
 			log.Debugf("Unknown IP protocol, ignoring: %v", pkt.ipProto)
@@ -221,4 +235,32 @@ func (p *proxy) copyFromUpstream() {
 			}
 		}
 	}
+}
+
+func (p *proxy) stackForICMP() (*stack.Stack, *channel.Endpoint, error) {
+	linkID, channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
+	s := stack.New([]string{ipv4.ProtocolName}, []string{tcp.ProtocolName, udp.ProtocolName}, stack.Options{})
+	if err := s.CreateNIC(nicID, linkID); err != nil {
+		s.Close()
+		return nil, nil, errors.New("Unable to create ICMP NIC: %v", err)
+	}
+	if err := s.SetPromiscuousMode(nicID, true); err != nil {
+		s.Close()
+		return nil, nil, errors.New("Unable to set ICMP NIC to promiscious mode: %v", err)
+	}
+	go func() {
+		for {
+			select {
+			case <-p.closedCh:
+				return
+			case pktInfo := <-channelEndpoint.C:
+				select {
+				case <-p.closedCh:
+					return
+				case p.toDownstream <- pktInfo:
+				}
+			}
+		}
+	}()
+	return s, channelEndpoint, nil
 }
