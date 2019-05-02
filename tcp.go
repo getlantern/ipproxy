@@ -2,7 +2,7 @@ package ipproxy
 
 import (
 	"context"
-	"time"
+	"sync"
 
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/buffer"
@@ -16,7 +16,6 @@ import (
 
 func (p *proxy) onTCP(pkt ipPacket) {
 	dstAddr := pkt.ft().dst
-	p.tcpOriginsMx.Lock()
 	o := p.tcpOrigins[dstAddr]
 	if o == nil {
 		var err error
@@ -26,26 +25,17 @@ func (p *proxy) onTCP(pkt ipPacket) {
 			return
 		}
 		p.tcpOrigins[dstAddr] = o
+		p.addTCPOrigin()
 	}
-	p.tcpOriginsMx.Unlock()
-
 	o.channelEndpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
 }
 
-func (p *proxy) createTCPOrigin(dstAddr addr) (*origin, error) {
-	o := newOrigin(p, tcp.ProtocolName, dstAddr, nil, func(o *origin) error {
-		p.tcpOriginsMx.Lock()
-		delete(p.tcpOrigins, dstAddr)
-		p.tcpOriginsMx.Unlock()
-		o.clientsMx.Lock()
-		clients := make([]*baseConn, 0, len(o.clients))
-		for _, client := range o.clients {
-			clients = append(clients, client)
-		}
-		o.clientsMx.Unlock()
-		for _, client := range o.clients {
-			client.closeNow()
-		}
+func (p *proxy) createTCPOrigin(dstAddr addr) (*tcpOrigin, error) {
+	o := &tcpOrigin{
+		conns: make(map[tcpip.FullAddress]*baseConn),
+	}
+	o.origin = *newOrigin(p, tcp.ProtocolName, dstAddr, nil, func(_o *origin) error {
+		o.closeAllConns()
 		return nil
 	})
 
@@ -67,7 +57,7 @@ func (p *proxy) createTCPOrigin(dstAddr addr) (*origin, error) {
 	return o, nil
 }
 
-func acceptTCP(o *origin) {
+func acceptTCP(o *tcpOrigin) {
 	defer o.closeNow()
 
 	for {
@@ -89,7 +79,7 @@ func acceptTCP(o *origin) {
 	}
 }
 
-func (o *origin) onAccept(acceptedEp tcpip.Endpoint, wq *waiter.Queue) {
+func (o *tcpOrigin) onAccept(acceptedEp tcpip.Endpoint, wq *waiter.Queue) {
 	upstream, dialErr := o.p.opts.DialTCP(context.Background(), "tcp", o.addr.String())
 	if dialErr != nil {
 		log.Errorf("Unexpected error dialing upstream to %v: %v", o.addr, dialErr)
@@ -101,69 +91,85 @@ func (o *origin) onAccept(acceptedEp tcpip.Endpoint, wq *waiter.Queue) {
 
 	downstreamAddr, _ := acceptedEp.GetRemoteAddress()
 	tcpConn := newBaseConn(o.p, upstreamValue, wq, func() error {
-		o.removeClient(downstreamAddr)
+		o.removeConn(downstreamAddr)
 		return nil
 	})
 	tcpConn.ep = acceptedEp
 	go tcpConn.copyToUpstream(nil)
 	go tcpConn.copyFromUpstream(tcpip.WriteOptions{})
-	o.addClient(downstreamAddr, tcpConn)
+	o.addConn(downstreamAddr, tcpConn)
 }
 
-// reapUDP reaps idled TCP connections and origins. We do this on a single
-// goroutine to avoid creating a bunch of timers for each connection
-// (which is expensive).
+type tcpOrigin struct {
+	origin
+	conns   map[tcpip.FullAddress]*baseConn
+	connsMx sync.Mutex
+}
+
+func (o *tcpOrigin) addConn(addr tcpip.FullAddress, conn *baseConn) {
+	o.connsMx.Lock()
+	o.conns[addr] = conn
+	o.connsMx.Unlock()
+	o.p.addTCPConn()
+}
+
+func (o *tcpOrigin) removeConn(addr tcpip.FullAddress) {
+	o.connsMx.Lock()
+	_, found := o.conns[addr]
+	if found {
+		delete(o.conns, addr)
+	}
+	o.connsMx.Unlock()
+	if found {
+		o.p.removeTCPConn()
+	}
+}
+
+func (o *tcpOrigin) closeAllConns() {
+	o.connsMx.Lock()
+	conns := make([]*baseConn, 0, len(o.conns))
+	for _, conn := range o.conns {
+		conns = append(conns, conn)
+	}
+	o.connsMx.Unlock()
+	for _, conn := range conns {
+		conn.closeNow()
+	}
+}
+
 func (p *proxy) reapTCP() {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-p.closeCh:
-			return
-		case <-ticker.C:
-			p.tcpOriginsMx.Lock()
-			origins := make(map[addr]*origin, len(p.tcpOrigins))
-			for a, o := range p.tcpOrigins {
-				origins[a] = o
-			}
-			p.tcpOriginsMx.Unlock()
-
-			for _, o := range origins {
-				o.clientsMx.Lock()
-				conns := make([]*baseConn, 0, len(o.clients))
-				for _, conn := range o.clients {
-					conns = append(conns, conn)
-				}
-				o.clientsMx.Unlock()
-				if len(conns) > 0 {
-					for _, conn := range conns {
-						if conn.timeSinceLastActive() > p.opts.IdleTimeout {
-							go conn.closeNow()
-						}
-					}
-				} else if o.timeSinceLastActive() > p.opts.IdleTimeout {
-					go o.closeNow()
+	for a, o := range p.tcpOrigins {
+		o.connsMx.Lock()
+		conns := make([]*baseConn, 0, len(o.conns))
+		for _, conn := range o.conns {
+			conns = append(conns, conn)
+		}
+		o.connsMx.Unlock()
+		if len(conns) > 0 {
+			for _, conn := range conns {
+				if conn.timeSinceLastActive() > p.opts.IdleTimeout {
+					log.Debug("Reaping TCP conn")
+					go conn.closeNow()
+					p.removeTCPConn()
 				}
 			}
+		}
+		if o.timeSinceLastActive() > p.opts.IdleTimeout {
+			go o.closeNow()
+			delete(p.tcpOrigins, a)
+			p.removeTCPOrigin()
 		}
 	}
 }
 
-func (p *proxy) finalizeTCP() (err error) {
-	p.tcpOriginsMx.Lock()
-	origins := make(map[addr]*origin, len(p.tcpOrigins))
+func (p *proxy) closeTCP() {
 	for a, o := range p.tcpOrigins {
-		origins[a] = o
+		log.Debug("Closing all conns")
+		o.closeAllConns()
+		log.Debug("Closing origin")
+		o.closeNow()
+		delete(p.tcpOrigins, a)
+		p.removeTCPOrigin()
+		log.Debug("Removed origin")
 	}
-	p.tcpOriginsMx.Unlock()
-
-	for _, o := range origins {
-		_err := o.closeNow()
-		if err == nil {
-			err = _err
-		}
-	}
-
-	return
 }

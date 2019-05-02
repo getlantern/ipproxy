@@ -14,30 +14,10 @@ func (p *proxy) trackStats() {
 		case <-p.closeCh:
 			return
 		case <-ticker.C:
-			numTCPOrigins, numTCPClients, numUDPConns := p.ConnCounts()
-			log.Debugf("TCP Origins: %v   TCP Clients: %v    UDP Conns: %v", numTCPOrigins, numTCPClients, numUDPConns)
+			log.Debugf("TCP Origins: %v   TCP Clients: %v    UDP Conns: %v", p.NumTCPOrigins(), p.NumTCPConns(), p.NumUDPConns())
 			log.Debugf("Accepted Packets: %d    Rejected Packets: %d", p.AcceptedPackets(), p.RejectedPackets())
 		}
 	}
-}
-
-func (p *proxy) ConnCounts() (numTCPOrigins int, numTCPClients int, numUDPConns int) {
-	p.tcpOriginsMx.Lock()
-	origins := make([]*origin, 0, len(p.tcpOrigins))
-	for _, o := range p.tcpOrigins {
-		origins = append(origins, o)
-	}
-	p.tcpOriginsMx.Unlock()
-	numTCPOrigins = len(origins)
-	for _, o := range origins {
-		numTCPClients += o.numClients()
-	}
-
-	p.udpConnsMx.Lock()
-	numUDPConns = len(p.udpConns)
-	p.udpConnsMx.Unlock()
-
-	return
 }
 
 func (p *proxy) acceptedPacket() {
@@ -54,4 +34,40 @@ func (p *proxy) rejectedPacket() {
 
 func (p *proxy) RejectedPackets() int {
 	return int(atomic.LoadInt64(&p.rejectedPackets))
+}
+
+func (p *proxy) addTCPOrigin() {
+	atomic.AddInt64(&p.numTcpOrigins, 1)
+}
+
+func (p *proxy) removeTCPOrigin() {
+	atomic.AddInt64(&p.numTcpOrigins, -1)
+}
+
+func (p *proxy) NumTCPOrigins() int {
+	return int(atomic.LoadInt64(&p.numTcpOrigins))
+}
+
+func (p *proxy) addTCPConn() {
+	atomic.AddInt64(&p.numTcpConns, 1)
+}
+
+func (p *proxy) removeTCPConn() {
+	atomic.AddInt64(&p.numTcpConns, -1)
+}
+
+func (p *proxy) NumTCPConns() int {
+	return int(atomic.LoadInt64(&p.numTcpConns))
+}
+
+func (p *proxy) addUDPConn() {
+	atomic.AddInt64(&p.numUdpConns, 1)
+}
+
+func (p *proxy) removeUDPConn() {
+	atomic.AddInt64(&p.numUdpConns, -1)
+}
+
+func (p *proxy) NumUDPConns() int {
+	return int(atomic.LoadInt64(&p.numUdpConns))
 }
