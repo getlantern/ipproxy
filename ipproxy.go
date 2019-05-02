@@ -108,8 +108,20 @@ type Proxy interface {
 	// Serve starts proxying and blocks until finished
 	Serve() error
 
-	// ConnCounts gets current counts of connections
-	ConnCounts() (numTCPOrigins int, numTCPClients int, numUDPConns int)
+	// Count of accepted packets
+	AcceptedPackets() int
+
+	// Count of rejected packets
+	RejectedPackets() int
+
+	// Number of TCP origins being tracked
+	NumTCPOrigins() int
+
+	// Number of TCP connections being tracked
+	NumTCPConns() int
+
+	// Number of UDP "connections" being tracked
+	NumUDPConns() int
 
 	// Close shuts down the proxy in an orderly fashion and blocks until shutdown
 	// is complete.
@@ -119,15 +131,17 @@ type Proxy interface {
 type proxy struct {
 	acceptedPackets int64
 	rejectedPackets int64
+	numTcpOrigins   int64
+	numTcpConns     int64
+	numUdpConns     int64
 
 	opts       *Opts
 	proto      tcpip.NetworkProtocolNumber
 	downstream io.ReadWriter
 
-	tcpOrigins   map[addr]*origin
-	tcpOriginsMx sync.Mutex
-	udpConns     map[fourtuple]*udpConn
-	udpConnsMx   sync.Mutex
+	pktIn      chan ipPacket
+	tcpOrigins map[addr]*tcpOrigin
+	udpConns   map[fourtuple]*udpConn
 
 	toDownstream chan channel.PacketInfo
 
@@ -141,10 +155,11 @@ func (p *proxy) Serve() error {
 	}
 
 	go p.trackStats()
-	go p.reapTCP()
-	go p.reapUDP()
 	go p.copyFromUpstream()
-	return p.copyToUpstream(icmpStack, icmpEndpoint)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go p.copyToUpstream(icmpStack, icmpEndpoint, &wg)
+	return p.readDownstreamPackets(&wg)
 }
 
 func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
@@ -155,7 +170,8 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		opts:         opts,
 		proto:        ipv4.ProtocolNumber,
 		downstream:   downstream,
-		tcpOrigins:   make(map[addr]*origin, 0),
+		pktIn:        make(chan ipPacket, 1000),
+		tcpOrigins:   make(map[addr]*tcpOrigin, 0),
 		udpConns:     make(map[fourtuple]*udpConn, 0),
 		toDownstream: make(chan channel.PacketInfo),
 		closeable: closeable{
@@ -166,20 +182,15 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 	}
 
 	p.finalizer = func() error {
-		err := p.finalizeTCP()
-		_err := p.finalizeUDP()
-		if err == nil {
-			err = _err
-		}
-		return err
+		return nil
 	}
 
 	return p, nil
 }
 
-func (p *proxy) copyToUpstream(icmpStack *stack.Stack, icmpEndpoint *channel.Endpoint) (finalErr error) {
+func (p *proxy) readDownstreamPackets(wg *sync.WaitGroup) (finalErr error) {
 	defer p.closeNow()
-	defer icmpStack.Close()
+	defer wg.Wait() // wait for copyToUpstream to finish with all of its cleanup
 
 	for {
 		// we can't reuse this byte slice across reads because each one is held in
@@ -199,20 +210,44 @@ func (p *proxy) copyToUpstream(icmpStack *stack.Stack, icmpEndpoint *channel.End
 			p.rejectedPacket()
 			continue
 		}
-		switch pkt.ipProto {
-		case IPProtocolTCP:
-			p.acceptedPacket()
-			p.onTCP(pkt)
-		case IPProtocolUDP:
-			p.acceptedPacket()
-			p.onUDP(pkt)
-		case IPProtocolICMP:
-			p.acceptedPacket()
-			icmpEndpoint.Inject(p.proto, buffer.View(pkt.raw).ToVectorisedView())
-		default:
-			p.rejectedPacket()
-			log.Debugf("Unknown IP protocol, ignoring: %v", pkt.ipProto)
-			continue
+
+		p.pktIn <- pkt
+	}
+}
+
+func (p *proxy) copyToUpstream(icmpStack *stack.Stack, icmpEndpoint *channel.Endpoint, wg *sync.WaitGroup) {
+	defer wg.Done()
+	defer p.closeNow()
+	defer icmpStack.Close()
+	defer p.closeTCP()
+	defer p.closeUDP()
+
+	reapTicker := time.NewTicker(1 * time.Second)
+	defer reapTicker.Stop()
+
+	for {
+		select {
+		case pkt := <-p.pktIn:
+			switch pkt.ipProto {
+			case IPProtocolTCP:
+				p.acceptedPacket()
+				p.onTCP(pkt)
+			case IPProtocolUDP:
+				p.acceptedPacket()
+				p.onUDP(pkt)
+			case IPProtocolICMP:
+				p.acceptedPacket()
+				icmpEndpoint.Inject(p.proto, buffer.View(pkt.raw).ToVectorisedView())
+			default:
+				p.rejectedPacket()
+				log.Debugf("Unknown IP protocol, ignoring: %v", pkt.ipProto)
+				continue
+			}
+		case <-reapTicker.C:
+			p.reapTCP()
+			p.reapUDP()
+		case <-p.closeCh:
+			return
 		}
 	}
 }

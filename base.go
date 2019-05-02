@@ -4,7 +4,6 @@ import (
 	"io"
 	"net"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -213,7 +212,6 @@ func newOrigin(p *proxy, transportProtocolName string, addr addr, upstream event
 		stack:           s,
 		linkID:          linkID,
 		channelEndpoint: channelEndpoint,
-		clients:         make(map[tcpip.FullAddress]*baseConn),
 	}
 	o.baseConn = newBaseConn(p, upstream, &waiter.Queue{}, func() (err error) {
 		if finalizer != nil {
@@ -238,8 +236,6 @@ type origin struct {
 	stack           *stack.Stack
 	linkID          tcpip.LinkEndpointID
 	channelEndpoint *channel.Endpoint
-	clients         map[tcpip.FullAddress]*baseConn
-	clientsMx       sync.Mutex
 }
 
 func (o *origin) copyToDownstream() {
@@ -275,23 +271,4 @@ func (o *origin) init(transportProtocol tcpip.TransportProtocolNumber, bindAddr 
 	}
 
 	return nil
-}
-
-func (o *origin) addClient(addr tcpip.FullAddress, client *baseConn) {
-	o.clientsMx.Lock()
-	o.clients[addr] = client
-	o.clientsMx.Unlock()
-}
-
-func (o *origin) removeClient(addr tcpip.FullAddress) {
-	o.clientsMx.Lock()
-	delete(o.clients, addr)
-	o.clientsMx.Unlock()
-}
-
-func (o *origin) numClients() int {
-	o.clientsMx.Lock()
-	numClients := len(o.clients)
-	o.clientsMx.Unlock()
-	return numClients
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"time"
 
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/buffer"
@@ -17,9 +16,7 @@ import (
 
 func (p *proxy) onUDP(pkt ipPacket) {
 	ft := pkt.ft()
-	p.udpConnsMx.Lock()
 	conn := p.udpConns[ft]
-	p.udpConnsMx.Unlock()
 	if conn == nil {
 		var err error
 		conn, err = p.startUDPConn(ft)
@@ -27,9 +24,8 @@ func (p *proxy) onUDP(pkt ipPacket) {
 			log.Error(err)
 			return
 		}
-		p.udpConnsMx.Lock()
 		p.udpConns[ft] = conn
-		p.udpConnsMx.Unlock()
+		p.addUDPConn()
 	}
 
 	conn.channelEndpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
@@ -41,9 +37,6 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 
 	conn := &udpConn{
 		origin: *newOrigin(p, udp.ProtocolName, ft.dst, upstreamValue, func(o *origin) error {
-			p.udpConnsMx.Lock()
-			delete(p.udpConns, ft)
-			p.udpConnsMx.Unlock()
 			return nil
 		}),
 		ft: ft,
@@ -91,47 +84,20 @@ type udpConn struct {
 	ft fourtuple
 }
 
-// reapUDP reaps idled UDP connections. We do this on a single goroutine to
-// avoid creating a bunch of timers for each connection (which is expensive).
 func (p *proxy) reapUDP() {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-p.closeCh:
-			return
-		case <-ticker.C:
-			time.Sleep(1 * time.Second)
-			p.udpConnsMx.Lock()
-			conns := make([]*udpConn, 0, len(p.udpConns))
-			for _, conn := range p.udpConns {
-				conns = append(conns, conn)
-			}
-			p.udpConnsMx.Unlock()
-			for _, conn := range conns {
-				if conn.timeSinceLastActive() > p.opts.IdleTimeout {
-					go conn.closeNow()
-				}
-			}
+	for ft, conn := range p.udpConns {
+		if conn.timeSinceLastActive() > p.opts.IdleTimeout {
+			go conn.closeNow()
+			delete(p.udpConns, ft)
+			p.removeUDPConn()
 		}
 	}
 }
 
-func (p *proxy) finalizeUDP() (err error) {
-	p.udpConnsMx.Lock()
-	conns := make([]*udpConn, 0)
-	for _, conn := range p.udpConns {
-		conns = append(conns, conn)
+func (p *proxy) closeUDP() {
+	for ft, conn := range p.udpConns {
+		conn.closeNow()
+		delete(p.udpConns, ft)
+		p.removeUDPConn()
 	}
-	p.udpConnsMx.Unlock()
-
-	for _, conn := range conns {
-		_err := conn.Close()
-		if err == nil {
-			err = _err
-		}
-	}
-
-	return
 }
