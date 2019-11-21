@@ -14,8 +14,9 @@ require (
 	github.com/getlantern/mtime v0.0.0-20170117193331-ba114e4a82b0 // indirect
 	github.com/getlantern/netx v0.0.0-20190110220209-9912de6f94fd // indirect
 	github.com/google/btree v1.0.0 // indirect
-	github.com/google/netstack v0.0.0-20190503185223-284c9ce35aac
+	github.com/google/netstack v0.0.0-20191116005144-95bf25ab4723
+	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c
 	github.com/stretchr/testify v1.3.0
+	golang.org/x/sys v0.0.0-20191120155948-bd437916bb0e // indirect
+	golang.org/x/time v0.0.0-20191024005414-555d28b269f0 // indirect
 )
-
-replace github.com/google/netstack => github.com/getlantern/netstack v0.0.0-20190313202628-8999826b821d

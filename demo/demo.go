@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/getlantern/golog"
-	"github.com/getlantern/gotun"
+	tun "github.com/getlantern/gotun"
 	"github.com/getlantern/ipproxy"
 )
 
@@ -90,22 +90,9 @@ func main() {
 	log.Debugf("Outbound TCP will use %v", laddrTCP)
 	log.Debugf("Outbound UDP will use %v", laddrUDP)
 
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch,
-		syscall.SIGHUP,
-		syscall.SIGINT,
-		syscall.SIGTERM,
-		syscall.SIGQUIT)
-	go func() {
-		<-ch
-		log.Debug("Closing TUN device")
-		dev.Close()
-		log.Debug("Closed TUN device")
-	}()
-
 	var d net.Dialer
 	p, err := ipproxy.New(dev, &ipproxy.Opts{
-		IdleTimeout:   2 * time.Second,
+		IdleTimeout:   70 * time.Second,
 		StatsInterval: 3 * time.Second,
 		DialTCP: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			// Send everything to tcpDest
@@ -127,6 +114,22 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch,
+		syscall.SIGHUP,
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGQUIT)
+	go func() {
+		<-ch
+		log.Debug("Closing TUN device")
+		dev.Close()
+		log.Debug("Closed TUN device")
+		p.Close()
+		log.Debug("Closed ipproxy")
+	}()
+
 	defer p.Close()
 	log.Debugf("Final result: %v", p.Serve())
 }

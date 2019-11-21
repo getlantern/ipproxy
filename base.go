@@ -115,7 +115,9 @@ func (conn *baseConn) copyToUpstream(readAddr *tcpip.FullAddress) {
 					continue
 				}
 			}
-			if !strings.Contains(readErr.String(), "endpoint is closed for receive") {
+			errString := readErr.String()
+			if !strings.Contains(errString, "endpoint is closed for receive") &&
+				!strings.Contains(errString, "connection reset") {
 				log.Errorf("Unexpected error reading from downstream: %v", readErr)
 			}
 			return
@@ -200,9 +202,12 @@ func (conn *baseConn) timeSinceLastActive() time.Duration {
 	return time.Duration(time.Now().UnixNano() - atomic.LoadInt64(&conn.lastActive))
 }
 
-func newOrigin(p *proxy, transportProtocolName string, addr addr, upstream eventual.Value, finalizer func(o *origin) error) *origin {
-	linkID, channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
-	s := stack.New([]string{ipv4.ProtocolName}, []string{transportProtocolName}, stack.Options{})
+func newOrigin(p *proxy, transportProtocol stack.TransportProtocol, addr addr, upstream eventual.Value, finalizer func(o *origin) error) *origin {
+	channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
+	s := stack.New(stack.Options{
+		NetworkProtocols:   []stack.NetworkProtocol{ipv4.NewProtocol()},
+		TransportProtocols: []stack.TransportProtocol{transportProtocol},
+	})
 
 	ipAddr := tcpip.Address(net.ParseIP(addr.ip).To4())
 
@@ -210,7 +215,6 @@ func newOrigin(p *proxy, transportProtocolName string, addr addr, upstream event
 		addr:            addr,
 		ipAddr:          ipAddr,
 		stack:           s,
-		linkID:          linkID,
 		channelEndpoint: channelEndpoint,
 	}
 	o.baseConn = newBaseConn(p, upstream, &waiter.Queue{}, func() (err error) {
@@ -234,7 +238,6 @@ type origin struct {
 	addr            addr
 	ipAddr          tcpip.Address
 	stack           *stack.Stack
-	linkID          tcpip.LinkEndpointID
 	channelEndpoint *channel.Endpoint
 }
 
@@ -254,7 +257,7 @@ func (o *origin) copyToDownstream() {
 }
 
 func (o *origin) init(transportProtocol tcpip.TransportProtocolNumber, bindAddr tcpip.FullAddress) error {
-	if err := o.stack.CreateNIC(nicID, o.linkID); err != nil {
+	if err := o.stack.CreateNIC(nicID, o.channelEndpoint); err != nil {
 		return errors.New("Unable to create TCP NIC: %v", err)
 	}
 	if aErr := o.stack.AddAddress(nicID, o.p.proto, o.ipAddr); aErr != nil {
