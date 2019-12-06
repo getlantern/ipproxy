@@ -189,8 +189,8 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 }
 
 func (p *proxy) readDownstreamPackets(wg *sync.WaitGroup) (finalErr error) {
-	defer p.closeNow()
 	defer wg.Wait() // wait for copyToUpstream to finish with all of its cleanup
+	defer p.closeNow()
 
 	for {
 		// we can't reuse this byte slice across reads because each one is held in

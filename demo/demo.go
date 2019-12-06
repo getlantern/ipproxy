@@ -1,3 +1,31 @@
+// This demo program allows testing ipproxy packet forwarding functionality
+// on a desktop machine using a TUN device.
+//
+// ./demo -gw 192.168.1.1
+//
+// Replace 192.168.1.1 with your default gateway (here and below as well).
+//
+// To have the demo program handle all your internet traffic, run:
+//
+// sudo route delete default
+// sudo route add default 10.0.0.2
+//
+// If using a proxies.yaml, you'll also need to manually set up a direct route
+// for proxy traffic via the default gateway, like so:
+//
+// sudo route add 67.205.172.79 192.168.1.1
+//
+// Now your network traffic will route through here to your proxy.
+//
+// When you're finished, you can fix your routing table with:
+//
+// sudo route delete default
+// sudo route add default 102.168.1.1
+//
+// If you added a manual route for the proxy, you'll want to remove that too:
+//
+// sudo route delete 67.205.172.79
+//
 package main
 
 import (
@@ -27,8 +55,8 @@ var (
 	tunMask   = flag.String("tun-mask", "255.255.255.0", "tun device netmask")
 	tunGW     = flag.String("tun-gw", "10.0.0.1", "tun device gateway")
 	ifOut     = flag.String("ifout", "en0", "name of interface to use for outbound connections")
-	tcpDest   = flag.String("tcpdest", "speedtest-ny.turnkeyinternet.net", "destination to which to connect all TCP traffic")
-	udpDest   = flag.String("udpdest", "8.8.8.8", "destination to which to connect all UDP traffic")
+	tcpDest   = flag.String("tcpdest", "", "destination to which to connect all TCP traffic")
+	udpDest   = flag.String("udpdest", "", "destination to which to connect all UDP traffic")
 	pprofAddr = flag.String("pprofaddr", "", "pprof address to listen on, not activate pprof if empty")
 )
 
@@ -95,16 +123,22 @@ func main() {
 		IdleTimeout:   70 * time.Second,
 		StatsInterval: 3 * time.Second,
 		DialTCP: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// Send everything to tcpDest
-			_, port, _ := net.SplitHostPort(addr)
-			conn, err := d.DialContext(ctx, network, *tcpDest+":"+port)
+			if *tcpDest != "" {
+				// Send everything to tcpDest
+				_, port, _ := net.SplitHostPort(addr)
+				addr = *tcpDest + ":" + port
+			}
+			conn, err := d.DialContext(ctx, network, addr)
 			log.Debugf("Dialed %v", conn.RemoteAddr())
 			return conn, err
 		},
 		DialUDP: func(ctx context.Context, network, addr string) (*net.UDPConn, error) {
-			// Send everything to udpDest
-			_, port, _ := net.SplitHostPort(addr)
-			conn, dialErr := net.Dial(network, *udpDest+":"+port)
+			if *udpDest != "" {
+				// Send everything to tcpDest
+				_, port, _ := net.SplitHostPort(addr)
+				addr = *udpDest + ":" + port
+			}
+			conn, dialErr := net.Dial(network, addr)
 			if dialErr != nil {
 				return nil, dialErr
 			}
