@@ -41,12 +41,11 @@ import (
 	"time"
 
 	"github.com/getlantern/golog"
-	tun "github.com/getlantern/gotun"
 	"github.com/getlantern/ipproxy"
 )
 
 var (
-	log = golog.LoggerFor("gotun-demo")
+	log = golog.LoggerFor("ipproxy-demo")
 )
 
 var (
@@ -85,9 +84,9 @@ func main() {
 		}()
 	}
 
-	dev, err := tun.OpenTunDevice(*tunDevice, *tunAddr, *tunGW, *tunMask, 1500)
+	dev, err := ipproxy.TUNDevice(*tunDevice, *tunAddr, *tunMask, 1500)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("error opening TUN device: %v", err)
 	}
 	defer dev.Close()
 

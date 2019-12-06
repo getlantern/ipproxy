@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/getlantern/fdcount"
-	tun "github.com/getlantern/gotun"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -102,13 +101,14 @@ func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw 
 	atomic.StoreInt64(&serverTCPConnections, 0)
 	ip := "127.0.0.1"
 
-	dev, err := tun.OpenTunDevice("tun0", addr, gw, "255.255.255.0")
+	dev, err := TUNDevice("tun5", addr, "255.255.255.0", 1500)
 	if err != nil {
 		if strings.HasSuffix(err.Error(), "operation not permitted") {
 			t.Log("This test requires root access. Compile, then run with root privileges. See the README for more details.")
 		}
 		t.Fatal(err)
 	}
+	defer dev.Close()
 
 	d := &net.Dialer{}
 	p, err := New(dev, &Opts{
