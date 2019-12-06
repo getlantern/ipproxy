@@ -8,7 +8,7 @@ require (
 	github.com/getlantern/eventual v0.0.0-20180125201821-84b02499361b
 	github.com/getlantern/fdcount v0.0.0-20170105153814-6a6cb5839bc5
 	github.com/getlantern/golog v0.0.0-20190809085441-26e09e6dd330
-	github.com/getlantern/gotun v0.0.0-20190422200803-35dee1b197b5
+	github.com/getlantern/gotun v0.0.0-20190809092752-6d35bb1397ee
 	github.com/getlantern/grtrack v0.0.0-20160824195228-cbf67d3fa0fd // indirect
 	github.com/getlantern/mockconn v0.0.0-20190403061815-a8ffa60494a6 // indirect
 	github.com/getlantern/mtime v0.0.0-20170117193331-ba114e4a82b0 // indirect

@@ -85,7 +85,7 @@ func main() {
 		}()
 	}
 
-	dev, err := tun.OpenTunDevice(*tunDevice, *tunAddr, *tunGW, *tunMask)
+	dev, err := tun.OpenTunDevice(*tunDevice, *tunAddr, *tunGW, *tunMask, 1500)
 	if err != nil {
 		log.Fatal(err)
 	}
