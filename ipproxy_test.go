@@ -26,12 +26,12 @@ var (
 
 // Note - this test has to be run with root permissions to allow setting up the
 // TUN device.
-func TestTCPandUDP(t *testing.T) {
+func TestTCPAndUDP(t *testing.T) {
 	doTest(
 		t,
 		2,
 		shortIdleTimeout,
-		"10.0.0.4", "10.0.0.3",
+		"10.0.0.2", "10.0.0.1",
 		func(p Proxy, uconn net.Conn, b []byte) {
 			assert.Equal(t, "helloudp", string(b))
 		},
@@ -59,7 +59,7 @@ func TestCloseCleanup(t *testing.T) {
 		t,
 		1,
 		longIdleTimeout,
-		"10.0.0.6", "10.0.0.5",
+		"10.0.2.2", "10.0.2.1",
 		func(p Proxy, uconn net.Conn, b []byte) {
 			assert.Equal(t, "helloudp", string(b))
 		},
@@ -101,7 +101,7 @@ func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw 
 	atomic.StoreInt64(&serverTCPConnections, 0)
 	ip := "127.0.0.1"
 
-	dev, err := TUNDevice("tun5", addr, "255.255.255.0", 1500)
+	dev, err := TUNDevice("", addr, "255.255.255.0", 1500)
 	if err != nil {
 		if strings.HasSuffix(err.Error(), "operation not permitted") {
 			t.Log("This test requires root access. Compile, then run with root privileges. See the README for more details.")
@@ -112,7 +112,8 @@ func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw 
 
 	d := &net.Dialer{}
 	p, err := New(dev, &Opts{
-		IdleTimeout: idleTimeout,
+		IdleTimeout:   idleTimeout,
+		StatsInterval: 5 * time.Second,
 		DialTCP: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			// Send everything to local echo server
 			_, port, _ := net.SplitHostPort(addr)
@@ -133,7 +134,11 @@ func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw 
 	}
 	defer p.Close()
 	defer dev.Close()
-	go p.Serve()
+	go func() {
+		if err := p.Serve(); err != nil {
+			log.Error(err)
+		}
+	}()
 
 	closeCh := make(chan interface{})
 	echoAddr := tcpEcho(t, closeCh, ip)

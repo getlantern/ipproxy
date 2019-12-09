@@ -154,7 +154,6 @@ func (p *proxy) reapTCP() {
 				if timeSinceConnLastActive > p.opts.IdleTimeout {
 					log.Debug("Reaping TCP conn")
 					go conn.closeNow()
-					p.removeTCPConn()
 				}
 				if timeSinceConnLastActive < timeSinceOriginLastActive {
 					timeSinceOriginLastActive = timeSinceConnLastActive

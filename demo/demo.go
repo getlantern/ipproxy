@@ -8,7 +8,7 @@
 // To have the demo program handle all your internet traffic, run:
 //
 // sudo route delete default
-// sudo route add default 10.0.0.2
+// sudo route add default 10.0.1.2
 //
 // If using a proxies.yaml, you'll also need to manually set up a direct route
 // for proxy traffic via the default gateway, like so:
@@ -49,10 +49,10 @@ var (
 )
 
 var (
-	tunDevice = flag.String("tun-device", "tun0", "tun device name")
-	tunAddr   = flag.String("tun-address", "10.0.0.2", "tun device address")
+	tunDevice = flag.String("tun-device", "tun5", "tun device name")
+	tunAddr   = flag.String("tun-address", "10.0.1.2", "tun device address")
 	tunMask   = flag.String("tun-mask", "255.255.255.0", "tun device netmask")
-	tunGW     = flag.String("tun-gw", "10.0.0.1", "tun device gateway")
+	tunGW     = flag.String("tun-gw", "10.0.1.1", "tun device gateway")
 	ifOut     = flag.String("ifout", "en0", "name of interface to use for outbound connections")
 	tcpDest   = flag.String("tcpdest", "", "destination to which to connect all TCP traffic")
 	udpDest   = flag.String("udpdest", "", "destination to which to connect all UDP traffic")
