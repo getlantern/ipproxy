@@ -18,3 +18,5 @@ require (
 	golang.org/x/sys v0.0.0-20191120155948-bd437916bb0e // indirect
 	golang.org/x/time v0.0.0-20191024005414-555d28b269f0 // indirect
 )
+
+replace github.com/google/netstack => github.com/getlantern/netstack v0.0.0-20191210203454-f54213f594e9
