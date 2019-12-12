@@ -20,7 +20,7 @@
 // When you're finished, you can fix your routing table with:
 //
 // sudo route delete default
-// sudo route add default 102.168.1.1
+// sudo route add default 192.168.1.1
 //
 // If you added a manual route for the proxy, you'll want to remove that too:
 //
