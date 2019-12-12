@@ -19,4 +19,4 @@ require (
 	golang.org/x/time v0.0.0-20191024005414-555d28b269f0 // indirect
 )
 
-replace github.com/google/netstack => github.com/getlantern/netstack v0.0.0-20191210203454-f54213f594e9
+replace github.com/google/netstack => github.com/getlantern/netstack v0.0.0-20191212040217-1650eee50330
