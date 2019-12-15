@@ -122,14 +122,10 @@ func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw 
 			_, port, _ := net.SplitHostPort(addr)
 			return d.DialContext(ctx, network, ip+":"+port)
 		},
-		DialUDP: func(ctx context.Context, network, addr string) (*net.UDPConn, error) {
+		DialUDP: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			// Send everything to local echo server
 			_, port, _ := net.SplitHostPort(addr)
-			conn, dialErr := net.Dial(network, ip+":"+port)
-			if dialErr != nil {
-				return nil, dialErr
-			}
-			return conn.(*net.UDPConn), nil
+			return net.Dial(network, ip+":"+port)
 		},
 	})
 	if !assert.NoError(t, err) {

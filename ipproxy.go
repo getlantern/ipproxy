@@ -63,7 +63,7 @@ type Opts struct {
 
 	// DialUDP specifies a function for dialing upstream UDP connections. Defaults
 	// to net.Dialer.DialContext().
-	DialUDP func(ctx context.Context, network, addr string) (*net.UDPConn, error)
+	DialUDP func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // ApplyDefaults applies the default values to the given Opts, including making
@@ -93,13 +93,7 @@ func (opts *Opts) ApplyDefaults() *Opts {
 	}
 	if opts.DialUDP == nil {
 		d := &net.Dialer{}
-		opts.DialUDP = func(ctx context.Context, network, addr string) (*net.UDPConn, error) {
-			conn, err := d.DialContext(ctx, network, addr)
-			if err != nil {
-				return nil, err
-			}
-			return conn.(*net.UDPConn), nil
-		}
+		opts.DialUDP = d.DialContext
 	}
 	return opts
 }

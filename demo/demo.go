@@ -131,17 +131,13 @@ func main() {
 			log.Debugf("Dialed %v", conn.RemoteAddr())
 			return conn, err
 		},
-		DialUDP: func(ctx context.Context, network, addr string) (*net.UDPConn, error) {
+		DialUDP: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if *udpDest != "" {
 				// Send everything to tcpDest
 				_, port, _ := net.SplitHostPort(addr)
 				addr = *udpDest + ":" + port
 			}
-			conn, dialErr := net.Dial(network, addr)
-			if dialErr != nil {
-				return nil, dialErr
-			}
-			return conn.(*net.UDPConn), nil
+			return net.Dial(network, addr)
 		},
 	})
 	if err != nil {
