@@ -6,12 +6,12 @@ import (
 	"net"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/getlantern/fdcount"
-	tun "github.com/getlantern/gotun"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -27,12 +27,12 @@ var (
 
 // Note - this test has to be run with root permissions to allow setting up the
 // TUN device.
-func TestTCPandUDP(t *testing.T) {
+func TestTCPAndUDP(t *testing.T) {
 	doTest(
 		t,
 		2,
 		shortIdleTimeout,
-		"10.0.0.4", "10.0.0.3",
+		"10.0.1.2", "10.0.1.1",
 		func(p Proxy, uconn net.Conn, b []byte) {
 			assert.Equal(t, "helloudp", string(b))
 		},
@@ -45,11 +45,10 @@ func TestTCPandUDP(t *testing.T) {
 			assert.Zero(t, atomic.LoadInt64(&serverTCPConnections), "Server-side TCP connection should have been closed")
 		},
 		func(p Proxy, dev io.Closer) {
-			time.Sleep(2 * shortIdleTimeout)
+			time.Sleep(10 * shortIdleTimeout)
 			log.Debug("checking")
 			assert.Zero(t, p.NumTCPOrigins(), "TCP origin should be purged after idle timeout")
 			assert.Zero(t, p.NumUDPConns(), "UDP conn should be purged after idle timeout")
-
 		})
 }
 
@@ -60,7 +59,7 @@ func TestCloseCleanup(t *testing.T) {
 		t,
 		1,
 		longIdleTimeout,
-		"10.0.0.6", "10.0.0.5",
+		"10.0.2.2", "10.0.2.1",
 		func(p Proxy, uconn net.Conn, b []byte) {
 			assert.Equal(t, "helloudp", string(b))
 		},
@@ -70,14 +69,15 @@ func TestCloseCleanup(t *testing.T) {
 		func(p Proxy, dev io.Closer) {
 			time.Sleep(2 * shortIdleTimeout)
 			// assert.Equal(t, 1, p.NumTCPOrigins(), "TCP origin should not be purged before idle timeout")
-			assert.Equal(t, 1, p.NumTCPConns(), "TCP client should not be purged before idle timeout")
-			assert.Equal(t, 1, p.NumUDPConns(), "UDP conns should not be purged before idle timeout")
+			assert.True(t, p.NumTCPConns() > 0, "TCP client should not be purged before idle timeout")
+			assert.True(t, p.NumUDPConns() > 0, "UDP conns should not be purged before idle timeout")
 			log.Debug("Closing device")
 			err := dev.Close()
 			if assert.NoError(t, err) {
 				log.Debug("Closing proxy")
 				err = p.Close()
 				if assert.NoError(t, err) {
+					time.Sleep(1 * time.Second)
 					log.Debug("Checking")
 					assert.Zero(t, p.NumTCPOrigins(), "TCP origin should be purged after close")
 					assert.Zero(t, p.NumTCPConns(), "TCP client should be purged after close")
@@ -89,7 +89,9 @@ func TestCloseCleanup(t *testing.T) {
 }
 
 func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw string, afterUDP func(Proxy, net.Conn, []byte), afterTCP func(Proxy, net.Conn, []byte), finish func(Proxy, io.Closer)) {
+	var wg sync.WaitGroup
 	defer func() {
+		wg.Wait()
 		buf := make([]byte, 1<<20)
 		stacklen := runtime.Stack(buf, true)
 		goroutines := string(buf[:stacklen])
@@ -102,30 +104,28 @@ func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw 
 	atomic.StoreInt64(&serverTCPConnections, 0)
 	ip := "127.0.0.1"
 
-	dev, err := tun.OpenTunDevice("tun0", addr, gw, "255.255.255.0")
+	dev, err := TUNDevice("", addr, "255.255.255.0", 1500)
 	if err != nil {
 		if strings.HasSuffix(err.Error(), "operation not permitted") {
 			t.Log("This test requires root access. Compile, then run with root privileges. See the README for more details.")
 		}
 		t.Fatal(err)
 	}
+	defer dev.Close()
 
 	d := &net.Dialer{}
 	p, err := New(dev, &Opts{
-		IdleTimeout: idleTimeout,
+		IdleTimeout:   idleTimeout,
+		StatsInterval: 1 * time.Second,
 		DialTCP: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			// Send everything to local echo server
 			_, port, _ := net.SplitHostPort(addr)
 			return d.DialContext(ctx, network, ip+":"+port)
 		},
-		DialUDP: func(ctx context.Context, network, addr string) (*net.UDPConn, error) {
+		DialUDP: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			// Send everything to local echo server
 			_, port, _ := net.SplitHostPort(addr)
-			conn, dialErr := net.Dial(network, ip+":"+port)
-			if dialErr != nil {
-				return nil, dialErr
-			}
-			return conn.(*net.UDPConn), nil
+			return net.Dial(network, ip+":"+port)
 		},
 	})
 	if !assert.NoError(t, err) {
@@ -133,7 +133,14 @@ func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw 
 	}
 	defer p.Close()
 	defer dev.Close()
-	go p.Serve()
+
+	wg.Add(1)
+	go func() {
+		if err := p.Serve(); err != nil {
+			log.Error(err)
+		}
+		wg.Done()
+	}()
 
 	closeCh := make(chan interface{})
 	echoAddr := tcpEcho(t, closeCh, ip)

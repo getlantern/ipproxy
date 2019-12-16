@@ -28,7 +28,9 @@ func (p *proxy) onUDP(pkt ipPacket) {
 		p.addUDPConn()
 	}
 
-	conn.channelEndpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
+	conn.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, tcpip.PacketBuffer{
+		Data: buffer.View(pkt.raw).ToVectorisedView(),
+	})
 }
 
 func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
@@ -36,7 +38,7 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 	downstreamIPAddr := tcpip.Address(net.ParseIP(ft.src.ip).To4())
 
 	conn := &udpConn{
-		origin: *newOrigin(p, udp.ProtocolName, ft.dst, upstreamValue, func(o *origin) error {
+		origin: *newOrigin(p, udp.NewProtocol(), ft.dst, upstreamValue, func(o *origin) error {
 			return nil
 		}),
 		ft: ft,
@@ -59,16 +61,16 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 	}
 
 	// to our NIC and routes packets to the downstreamIPAddr as well,
+	upstreamSubnet, _ := tcpip.NewSubnet(conn.ipAddr, tcpip.AddressMask(conn.ipAddr))
+	downstreamSubnet, _ := tcpip.NewSubnet(downstreamIPAddr, tcpip.AddressMask(downstreamIPAddr))
 	conn.stack.SetRouteTable([]tcpip.Route{
 		{
-			Destination: conn.ipAddr,
-			Mask:        tcpip.AddressMask(conn.ipAddr),
+			Destination: upstreamSubnet,
 			Gateway:     "",
 			NIC:         nicID,
 		},
 		{
-			Destination: downstreamIPAddr,
-			Mask:        tcpip.AddressMask(downstreamIPAddr),
+			Destination: downstreamSubnet,
 			Gateway:     "",
 			NIC:         nicID,
 		},

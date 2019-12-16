@@ -63,7 +63,7 @@ type Opts struct {
 
 	// DialUDP specifies a function for dialing upstream UDP connections. Defaults
 	// to net.Dialer.DialContext().
-	DialUDP func(ctx context.Context, network, addr string) (*net.UDPConn, error)
+	DialUDP func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // ApplyDefaults applies the default values to the given Opts, including making
@@ -93,13 +93,7 @@ func (opts *Opts) ApplyDefaults() *Opts {
 	}
 	if opts.DialUDP == nil {
 		d := &net.Dialer{}
-		opts.DialUDP = func(ctx context.Context, network, addr string) (*net.UDPConn, error) {
-			conn, err := d.DialContext(ctx, network, addr)
-			if err != nil {
-				return nil, err
-			}
-			return conn.(*net.UDPConn), nil
-		}
+		opts.DialUDP = d.DialContext
 	}
 	return opts
 }
@@ -189,8 +183,8 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 }
 
 func (p *proxy) readDownstreamPackets(wg *sync.WaitGroup) (finalErr error) {
-	defer p.closeNow()
 	defer wg.Wait() // wait for copyToUpstream to finish with all of its cleanup
+	defer p.closeNow()
 
 	for {
 		// we can't reuse this byte slice across reads because each one is held in
@@ -237,7 +231,7 @@ func (p *proxy) copyToUpstream(icmpStack *stack.Stack, icmpEndpoint *channel.End
 				p.onUDP(pkt)
 			case IPProtocolICMP:
 				p.acceptedPacket()
-				icmpEndpoint.Inject(p.proto, buffer.View(pkt.raw).ToVectorisedView())
+				icmpEndpoint.InjectInbound(p.proto, tcpip.PacketBuffer{Data: buffer.View(pkt.raw).ToVectorisedView()})
 			default:
 				p.rejectedPacket()
 				log.Debugf("Unknown IP protocol, ignoring: %v", pkt.ipProto)
@@ -261,8 +255,8 @@ func (p *proxy) copyFromUpstream() {
 			return
 		case pktInfo := <-p.toDownstream:
 			pkt := make([]byte, 0, p.opts.MTU)
-			pkt = append(pkt, pktInfo.Header...)
-			pkt = append(pkt, pktInfo.Payload...)
+			pkt = append(pkt, pktInfo.Pkt.Header.View()...)
+			pkt = append(pkt, pktInfo.Pkt.Data.ToView()...)
 			_, err := p.downstream.Write(pkt)
 			if err != nil {
 				log.Errorf("Unexpected error writing to downstream: %v", err)
@@ -273,9 +267,12 @@ func (p *proxy) copyFromUpstream() {
 }
 
 func (p *proxy) stackForICMP() (*stack.Stack, *channel.Endpoint, error) {
-	linkID, channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
-	s := stack.New([]string{ipv4.ProtocolName}, []string{tcp.ProtocolName, udp.ProtocolName}, stack.Options{})
-	if err := s.CreateNIC(nicID, linkID); err != nil {
+	channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
+	s := stack.New(stack.Options{
+		NetworkProtocols:   []stack.NetworkProtocol{ipv4.NewProtocol()},
+		TransportProtocols: []stack.TransportProtocol{tcp.NewProtocol(), udp.NewProtocol()},
+	})
+	if err := s.CreateNIC(nicID, channelEndpoint); err != nil {
 		s.Close()
 		return nil, nil, errors.New("Unable to create ICMP NIC: %v", err)
 	}

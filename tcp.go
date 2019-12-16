@@ -27,14 +27,16 @@ func (p *proxy) onTCP(pkt ipPacket) {
 		p.tcpOrigins[dstAddr] = o
 		p.addTCPOrigin()
 	}
-	o.channelEndpoint.Inject(ipv4.ProtocolNumber, buffer.View(pkt.raw).ToVectorisedView())
+	o.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, tcpip.PacketBuffer{
+		Data: buffer.View(pkt.raw).ToVectorisedView(),
+	})
 }
 
 func (p *proxy) createTCPOrigin(dstAddr addr) (*tcpOrigin, error) {
 	o := &tcpOrigin{
 		conns: make(map[tcpip.FullAddress]*baseConn),
 	}
-	o.origin = *newOrigin(p, tcp.ProtocolName, dstAddr, nil, func(_o *origin) error {
+	o.origin = *newOrigin(p, tcp.NewProtocol(), dstAddr, nil, func(_o *origin) error {
 		o.closeAllConns()
 		return nil
 	})
@@ -145,16 +147,20 @@ func (p *proxy) reapTCP() {
 			conns = append(conns, conn)
 		}
 		o.connsMx.Unlock()
+		timeSinceOriginLastActive := o.timeSinceLastActive()
 		if len(conns) > 0 {
 			for _, conn := range conns {
-				if conn.timeSinceLastActive() > p.opts.IdleTimeout {
+				timeSinceConnLastActive := conn.timeSinceLastActive()
+				if timeSinceConnLastActive > p.opts.IdleTimeout {
 					log.Debug("Reaping TCP conn")
 					go conn.closeNow()
-					p.removeTCPConn()
+				}
+				if timeSinceConnLastActive < timeSinceOriginLastActive {
+					timeSinceOriginLastActive = timeSinceConnLastActive
 				}
 			}
 		}
-		if o.timeSinceLastActive() > p.opts.IdleTimeout {
+		if timeSinceOriginLastActive > p.opts.IdleTimeout {
 			go o.closeNow()
 			delete(p.tcpOrigins, a)
 			p.removeTCPOrigin()
