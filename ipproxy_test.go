@@ -132,7 +132,6 @@ func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw 
 		return
 	}
 	defer p.Close()
-	defer dev.Close()
 
 	wg.Add(1)
 	go func() {
