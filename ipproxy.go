@@ -197,7 +197,6 @@ func (p *proxy) readDownstreamPackets(wg *sync.WaitGroup) (finalErr error) {
 			}
 			return errors.New("Unexpected error reading from downstream: %v", err)
 		}
-		log.Debug("Read packet")
 		raw := b[:n]
 		pkt, err := parseIPPacket(raw)
 		if err != nil {
