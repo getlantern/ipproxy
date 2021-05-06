@@ -1,17 +1,18 @@
 package ipproxy
 
 import (
+	"bytes"
 	"io"
 	"net"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/google/netstack/tcpip"
-	"github.com/google/netstack/tcpip/link/channel"
-	"github.com/google/netstack/tcpip/network/ipv4"
-	"github.com/google/netstack/tcpip/stack"
-	"github.com/google/netstack/waiter"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/waiter"
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/eventual"
@@ -98,16 +99,18 @@ func (conn *baseConn) copyToUpstream(readAddr *tcpip.FullAddress) {
 	}
 
 	for {
-		buf, _, readErr := conn.ep.Read(readAddr)
-		if len(buf) > 0 {
-			if _, writeErr := upstream.Write(buf); writeErr != nil {
+		var b bytes.Buffer
+		_ = io.Writer(&b)
+		result, readErr := conn.ep.Read(&b, tcpip.ReadOptions{NeedRemoteAddr: true})
+		if b.Len() > 0 {
+			if _, writeErr := upstream.Write(b.Bytes()); writeErr != nil {
 				log.Errorf("Unexpected error writing to upstream: %v", writeErr)
 				return
 			}
 		}
 
 		if readErr != nil {
-			if readErr == tcpip.ErrWouldBlock {
+			if _, ok := readErr.(*tcpip.ErrWouldBlock); ok {
 				select {
 				case <-conn.closeCh:
 					return
@@ -122,6 +125,7 @@ func (conn *baseConn) copyToUpstream(readAddr *tcpip.FullAddress) {
 			}
 			return
 		}
+		*readAddr = result.RemoteAddr
 
 		conn.markActive()
 
@@ -170,9 +174,9 @@ func (conn *baseConn) copyFromUpstream(responseOptions tcpip.WriteOptions) {
 func (conn *baseConn) writeToDownstream(b []byte, responseOptions tcpip.WriteOptions) *tcpip.Error {
 	// write in a loop since partial writes are a possibility
 	for i := time.Duration(0); true; i++ {
-		n, _, writeErr := conn.ep.Write(tcpip.SlicePayload(b), responseOptions)
+		n, writeErr := conn.ep.Write(bytes.NewBuffer(b), responseOptions)
 		if writeErr != nil {
-			if writeErr == tcpip.ErrWouldBlock {
+			if _, ok := writeErr.(*tcpip.ErrWouldBlock); ok {
 				// back off and retry
 				waitTime := i * 1 * time.Millisecond
 				if waitTime > maxWriteWait {
@@ -183,7 +187,7 @@ func (conn *baseConn) writeToDownstream(b []byte, responseOptions tcpip.WriteOpt
 				}
 				continue
 			}
-			return writeErr
+			return &writeErr
 		}
 		b = b[n:]
 		if len(b) == 0 {
@@ -202,11 +206,11 @@ func (conn *baseConn) timeSinceLastActive() time.Duration {
 	return time.Duration(time.Now().UnixNano() - atomic.LoadInt64(&conn.lastActive))
 }
 
-func newOrigin(p *proxy, transportProtocol stack.TransportProtocol, addr addr, upstream eventual.Value, finalizer func(o *origin) error) *origin {
+func newOrigin(p *proxy, transportProtocol stack.TransportProtocolFactory, addr addr, upstream eventual.Value, finalizer func(o *origin) error) *origin {
 	channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
 	s := stack.New(stack.Options{
-		NetworkProtocols:   []stack.NetworkProtocol{ipv4.NewProtocol()},
-		TransportProtocols: []stack.TransportProtocol{transportProtocol},
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{transportProtocol},
 	})
 
 	ipAddr := tcpip.Address(net.ParseIP(addr.ip).To4())
@@ -246,11 +250,9 @@ func (o *origin) copyToDownstream() {
 		select {
 		case <-o.closedCh:
 			return
-		case pktInfo := <-o.channelEndpoint.C:
-			select {
-			case <-o.closedCh:
-				return
-			case o.p.toDownstream <- pktInfo:
+		default:
+			if pktInfo, ok := o.channelEndpoint.Read(); ok {
+				o.p.toDownstream <- pktInfo
 			}
 		}
 	}
@@ -264,7 +266,7 @@ func (o *origin) init(transportProtocol tcpip.TransportProtocolNumber, bindAddr 
 		return errors.New("Unable to assign NIC IP address: %v", aErr)
 	}
 
-	var epErr *tcpip.Error
+	var epErr tcpip.Error
 	if o.ep, epErr = o.stack.NewEndpoint(transportProtocol, o.p.proto, o.wq); epErr != nil {
 		return errors.New("Unable to create endpoint: %v", epErr)
 	}

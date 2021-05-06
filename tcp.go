@@ -4,11 +4,12 @@ import (
 	"context"
 	"sync"
 
-	"github.com/google/netstack/tcpip"
-	"github.com/google/netstack/tcpip/buffer"
-	"github.com/google/netstack/tcpip/network/ipv4"
-	"github.com/google/netstack/tcpip/transport/tcp"
-	"github.com/google/netstack/waiter"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/waiter"
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/eventual"
@@ -27,16 +28,16 @@ func (p *proxy) onTCP(pkt ipPacket) {
 		p.tcpOrigins[dstAddr] = o
 		p.addTCPOrigin()
 	}
-	o.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, tcpip.PacketBuffer{
-		Data: buffer.View(pkt.raw).ToVectorisedView(),
-	})
+	o.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, stack.NewPacketBuffer(stack.PacketBufferOptions{
+		Data: buffer.View(pkt.raw).ToVectorisedView()},
+	))
 }
 
 func (p *proxy) createTCPOrigin(dstAddr addr) (*tcpOrigin, error) {
 	o := &tcpOrigin{
 		conns: make(map[tcpip.FullAddress]*baseConn),
 	}
-	o.origin = *newOrigin(p, tcp.NewProtocol(), dstAddr, nil, func(_o *origin) error {
+	o.origin = *newOrigin(p, tcp.NewProtocol, dstAddr, nil, func(_o *origin) error {
 		o.closeAllConns()
 		return nil
 	})
@@ -63,9 +64,9 @@ func acceptTCP(o *tcpOrigin) {
 	defer o.closeNow()
 
 	for {
-		acceptedEp, wq, err := o.ep.Accept()
+		acceptedEp, wq, err := o.ep.Accept(nil)
 		if err != nil {
-			if err == tcpip.ErrWouldBlock {
+			if _, ok := err.(*tcpip.ErrWouldBlock); ok {
 				select {
 				case <-o.closeCh:
 					return

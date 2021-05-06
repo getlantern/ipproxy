@@ -9,16 +9,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/netstack/tcpip"
-	"github.com/google/netstack/tcpip/buffer"
-	"github.com/google/netstack/tcpip/link/channel"
-	"github.com/google/netstack/tcpip/network/ipv4"
-	"github.com/google/netstack/tcpip/stack"
-	"github.com/google/netstack/tcpip/transport/tcp"
-	"github.com/google/netstack/tcpip/transport/udp"
-
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 )
 
 var (
@@ -231,7 +230,7 @@ func (p *proxy) copyToUpstream(icmpStack *stack.Stack, icmpEndpoint *channel.End
 				p.onUDP(pkt)
 			case IPProtocolICMP:
 				p.acceptedPacket()
-				icmpEndpoint.InjectInbound(p.proto, tcpip.PacketBuffer{Data: buffer.View(pkt.raw).ToVectorisedView()})
+				icmpEndpoint.InjectInbound(p.proto, stack.NewPacketBuffer(stack.PacketBufferOptions{Data: buffer.View(pkt.raw).ToVectorisedView()}))
 			default:
 				p.rejectedPacket()
 				log.Debugf("Unknown IP protocol, ignoring: %v", pkt.ipProto)
@@ -255,8 +254,10 @@ func (p *proxy) copyFromUpstream() {
 			return
 		case pktInfo := <-p.toDownstream:
 			pkt := make([]byte, 0, p.opts.MTU)
-			pkt = append(pkt, pktInfo.Pkt.Header.View()...)
-			pkt = append(pkt, pktInfo.Pkt.Data.ToView()...)
+			pkt = append(pkt, pktInfo.Pkt.LinkHeader().View()...)
+			for _, view := range pktInfo.Pkt.Data().Views() {
+				pkt = append(pkt, view...)
+			}
 			_, err := p.downstream.Write(pkt)
 			if err != nil {
 				log.Errorf("Unexpected error writing to downstream: %v", err)
@@ -269,8 +270,8 @@ func (p *proxy) copyFromUpstream() {
 func (p *proxy) stackForICMP() (*stack.Stack, *channel.Endpoint, error) {
 	channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
 	s := stack.New(stack.Options{
-		NetworkProtocols:   []stack.NetworkProtocol{ipv4.NewProtocol()},
-		TransportProtocols: []stack.TransportProtocol{tcp.NewProtocol(), udp.NewProtocol()},
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
 	})
 	if err := s.CreateNIC(nicID, channelEndpoint); err != nil {
 		s.Close()
@@ -285,11 +286,9 @@ func (p *proxy) stackForICMP() (*stack.Stack, *channel.Endpoint, error) {
 			select {
 			case <-p.closedCh:
 				return
-			case pktInfo := <-channelEndpoint.C:
-				select {
-				case <-p.closedCh:
-					return
-				case p.toDownstream <- pktInfo:
+			default:
+				if pktInfo, ok := channelEndpoint.Read(); ok {
+					p.toDownstream <- pktInfo
 				}
 			}
 		}

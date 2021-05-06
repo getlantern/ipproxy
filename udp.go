@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/google/netstack/tcpip"
-	"github.com/google/netstack/tcpip/buffer"
-	"github.com/google/netstack/tcpip/network/ipv4"
-	"github.com/google/netstack/tcpip/transport/udp"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/eventual"
@@ -28,9 +29,9 @@ func (p *proxy) onUDP(pkt ipPacket) {
 		p.addUDPConn()
 	}
 
-	conn.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, tcpip.PacketBuffer{
+	conn.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Data: buffer.View(pkt.raw).ToVectorisedView(),
-	})
+	}))
 }
 
 func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
@@ -38,7 +39,7 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 	downstreamIPAddr := tcpip.Address(net.ParseIP(ft.src.ip).To4())
 
 	conn := &udpConn{
-		origin: *newOrigin(p, udp.NewProtocol(), ft.dst, upstreamValue, func(o *origin) error {
+		origin: *newOrigin(p, udp.NewProtocol, ft.dst, upstreamValue, func(o *origin) error {
 			return nil
 		}),
 		ft: ft,
