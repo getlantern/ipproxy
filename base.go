@@ -2,6 +2,7 @@ package ipproxy
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net"
 	"strings"
@@ -25,13 +26,15 @@ const (
 )
 
 type baseConn struct {
-	lastActive int64
-	p          *proxy
-	upstream   eventual.Value
-	ep         tcpip.Endpoint
-	wq         *waiter.Queue
-	waitEntry  *waiter.Entry
-	notifyCh   chan struct{}
+	lastActive    int64
+	p             *proxy
+	upstream      eventual.Value
+	ep            tcpip.Endpoint
+	wq            *waiter.Queue
+	waitEntry     *waiter.Entry
+	notifyCh      chan struct{}
+	context       context.Context
+	cancelContext context.CancelFunc
 
 	closeable
 }
@@ -39,13 +42,15 @@ type baseConn struct {
 func newBaseConn(p *proxy, upstream eventual.Value, wq *waiter.Queue, finalizer func() error) *baseConn {
 	waitEntry, notifyCh := waiter.NewChannelEntry(nil)
 	wq.EventRegister(&waitEntry, waiter.EventIn)
-
+	context, cancelContext := context.WithCancel(context.Background())
 	conn := &baseConn{
-		p:         p,
-		upstream:  upstream,
-		wq:        wq,
-		waitEntry: &waitEntry,
-		notifyCh:  notifyCh,
+		p:             p,
+		upstream:      upstream,
+		wq:            wq,
+		waitEntry:     &waitEntry,
+		notifyCh:      notifyCh,
+		context:       context,
+		cancelContext: cancelContext,
 		closeable: closeable{
 			closeCh:           make(chan struct{}),
 			readyToFinalizeCh: make(chan struct{}),
@@ -67,6 +72,8 @@ func newBaseConn(p *proxy, upstream eventual.Value, wq *waiter.Queue, finalizer 
 		}
 
 		conn.wq.EventUnregister(conn.waitEntry)
+		conn.cancelContext()
+
 		if conn.ep != nil {
 			conn.ep.Close()
 		}
@@ -90,7 +97,7 @@ func (conn *baseConn) getUpstream(timeout time.Duration) io.ReadWriteCloser {
 	return upstream.(io.ReadWriteCloser)
 }
 
-func (conn *baseConn) copyToUpstream(readAddr *tcpip.FullAddress) {
+func (conn *baseConn) copyToUpstream() {
 	defer conn.closeNow()
 
 	upstream := conn.getUpstream(conn.p.opts.IdleTimeout)
@@ -101,7 +108,7 @@ func (conn *baseConn) copyToUpstream(readAddr *tcpip.FullAddress) {
 	for {
 		var b bytes.Buffer
 		_ = io.Writer(&b)
-		result, readErr := conn.ep.Read(&b, tcpip.ReadOptions{NeedRemoteAddr: true})
+		_, readErr := conn.ep.Read(&b, tcpip.ReadOptions{})
 		if b.Len() > 0 {
 			if _, writeErr := upstream.Write(b.Bytes()); writeErr != nil {
 				log.Errorf("Unexpected error writing to upstream: %v", writeErr)
@@ -125,7 +132,6 @@ func (conn *baseConn) copyToUpstream(readAddr *tcpip.FullAddress) {
 			}
 			return
 		}
-		*readAddr = result.RemoteAddr
 
 		conn.markActive()
 
@@ -251,7 +257,7 @@ func (o *origin) copyToDownstream() {
 		case <-o.closedCh:
 			return
 		default:
-			if pktInfo, ok := o.channelEndpoint.Read(); ok {
+			if pktInfo, ok := o.channelEndpoint.ReadContext(o.context); ok {
 				o.p.toDownstream <- pktInfo
 			}
 		}

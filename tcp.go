@@ -98,7 +98,7 @@ func (o *tcpOrigin) onAccept(acceptedEp tcpip.Endpoint, wq *waiter.Queue) {
 		return nil
 	})
 	tcpConn.ep = acceptedEp
-	go tcpConn.copyToUpstream(nil)
+	go tcpConn.copyToUpstream()
 	go tcpConn.copyFromUpstream(tcpip.WriteOptions{})
 	o.addConn(downstreamAddr, tcpConn)
 }

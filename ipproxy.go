@@ -138,6 +138,9 @@ type proxy struct {
 
 	toDownstream chan channel.PacketInfo
 
+	context       context.Context
+	cancelContext context.CancelFunc
+
 	closeable
 }
 
@@ -158,15 +161,17 @@ func (p *proxy) Serve() error {
 func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 	// Default options
 	opts = opts.ApplyDefaults()
-
+	context, cancelContext := context.WithCancel(context.Background())
 	p := &proxy{
-		opts:         opts,
-		proto:        ipv4.ProtocolNumber,
-		downstream:   downstream,
-		pktIn:        make(chan ipPacket, 1000),
-		tcpOrigins:   make(map[addr]*tcpOrigin, 0),
-		udpConns:     make(map[fourtuple]*udpConn, 0),
-		toDownstream: make(chan channel.PacketInfo),
+		opts:          opts,
+		proto:         ipv4.ProtocolNumber,
+		downstream:    downstream,
+		pktIn:         make(chan ipPacket, 1000),
+		tcpOrigins:    make(map[addr]*tcpOrigin, 0),
+		udpConns:      make(map[fourtuple]*udpConn, 0),
+		toDownstream:  make(chan channel.PacketInfo),
+		context:       context,
+		cancelContext: cancelContext,
 		closeable: closeable{
 			closeCh:           make(chan struct{}),
 			readyToFinalizeCh: make(chan struct{}),
@@ -175,6 +180,7 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 	}
 
 	p.finalizer = func() error {
+		p.cancelContext()
 		return nil
 	}
 
@@ -254,8 +260,7 @@ func (p *proxy) copyFromUpstream() {
 			return
 		case pktInfo := <-p.toDownstream:
 			pkt := make([]byte, 0, p.opts.MTU)
-			pkt = append(pkt, pktInfo.Pkt.LinkHeader().View()...)
-			for _, view := range pktInfo.Pkt.Data().Views() {
+			for _, view := range pktInfo.Pkt.Views() {
 				pkt = append(pkt, view...)
 			}
 			_, err := p.downstream.Write(pkt)
@@ -287,7 +292,7 @@ func (p *proxy) stackForICMP() (*stack.Stack, *channel.Endpoint, error) {
 			case <-p.closedCh:
 				return
 			default:
-				if pktInfo, ok := channelEndpoint.Read(); ok {
+				if pktInfo, ok := channelEndpoint.ReadContext(p.context); ok {
 					p.toDownstream <- pktInfo
 				}
 			}

@@ -77,7 +77,7 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 		},
 	})
 
-	go conn.copyToUpstream(&tcpip.FullAddress{0, "", ft.dst.port})
+	go conn.copyToUpstream()
 	go conn.copyFromUpstream(tcpip.WriteOptions{To: &tcpip.FullAddress{0, downstreamIPAddr, ft.src.port}})
 	return conn, nil
 }
