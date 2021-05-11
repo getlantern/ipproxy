@@ -42,14 +42,14 @@ type baseConn struct {
 func newBaseConn(p *proxy, upstream eventual.Value, wq *waiter.Queue, finalizer func() error) *baseConn {
 	waitEntry, notifyCh := waiter.NewChannelEntry(nil)
 	wq.EventRegister(&waitEntry, waiter.EventIn)
-	context, cancelContext := context.WithCancel(context.Background())
+	ctx, cancelContext := context.WithCancel(context.Background())
 	conn := &baseConn{
 		p:             p,
 		upstream:      upstream,
 		wq:            wq,
 		waitEntry:     &waitEntry,
 		notifyCh:      notifyCh,
-		context:       context,
+		context:       ctx,
 		cancelContext: cancelContext,
 		closeable: closeable{
 			closeCh:           make(chan struct{}),
@@ -259,7 +259,14 @@ func (o *origin) copyToDownstream() {
 			return
 		default:
 			if pktInfo, ok := o.channelEndpoint.ReadContext(o.context); ok {
-				o.p.toDownstream <- pktInfo
+				select {
+				case o.p.toDownstream <- pktInfo:
+					continue
+				default:
+					return
+				}
+			} else {
+				return
 			}
 		}
 	}

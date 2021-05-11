@@ -4,6 +4,7 @@ package ipproxy
 
 import (
 	"context"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"io"
 	"net"
 	"sync"
@@ -282,10 +283,9 @@ func (p *proxy) stackForICMP() (*stack.Stack, *channel.Endpoint, error) {
 		s.Close()
 		return nil, nil, errors.New("Unable to create ICMP NIC: %v", err)
 	}
-	if err := s.SetPromiscuousMode(nicID, true); err != nil {
-		s.Close()
-		return nil, nil, errors.New("Unable to set ICMP NIC to promiscious mode: %v", err)
-	}
+	s.SetRouteTable([]tcpip.Route{
+		{Destination: header.IPv4EmptySubnet, NIC: nicID},
+	})
 	go func() {
 		for {
 			select {
@@ -293,7 +293,14 @@ func (p *proxy) stackForICMP() (*stack.Stack, *channel.Endpoint, error) {
 				return
 			default:
 				if pktInfo, ok := channelEndpoint.ReadContext(p.context); ok {
-					p.toDownstream <- pktInfo
+					select {
+					case p.toDownstream <- pktInfo:
+						continue
+					default:
+						return
+					}
+				} else {
+					return
 				}
 			}
 		}

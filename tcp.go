@@ -2,6 +2,7 @@ package ipproxy
 
 import (
 	"context"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"sync"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -46,10 +47,10 @@ func (p *proxy) createTCPOrigin(dstAddr addr) (*tcpOrigin, error) {
 		o.closeNow()
 		return nil, errors.New("Unable to initialize TCP origin: %v", err)
 	}
-	if pErr := o.stack.SetPromiscuousMode(nicID, true); pErr != nil {
-		o.closeNow()
-		return nil, errors.New("Unable to set NIC to promiscuous mode: %v", pErr)
-	}
+
+	o.stack.SetRouteTable([]tcpip.Route{
+		{Destination: header.IPv4EmptySubnet, NIC: nicID},
+	})
 
 	if err := o.ep.Listen(p.opts.TCPConnectBacklog); err != nil {
 		o.closeNow()
