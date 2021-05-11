@@ -77,7 +77,6 @@ func newBaseConn(p *proxy, upstream eventual.Value, wq *waiter.Queue, finalizer 
 		if conn.ep != nil {
 			conn.ep.Close()
 		}
-		conn.cancelContext()
 
 		return
 	}
