@@ -105,9 +105,8 @@ func (conn *baseConn) copyToUpstream() {
 		return
 	}
 
+	var b bytes.Buffer
 	for {
-		var b bytes.Buffer
-		_ = io.Writer(&b)
 		_, readErr := conn.ep.Read(&b, tcpip.ReadOptions{})
 		if b.Len() > 0 {
 			if _, writeErr := upstream.Write(b.Bytes()); writeErr != nil {
