@@ -4,11 +4,12 @@ package ipproxy
 
 import (
 	"context"
-	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"io"
 	"net"
 	"sync"
 	"time"
+
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"

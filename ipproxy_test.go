@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/getlantern/fdcount"
+	"github.com/getlantern/grtrack"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -103,6 +104,10 @@ func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw 
 
 	atomic.StoreInt64(&serverTCPConnections, 0)
 	ip := "127.0.0.1"
+
+	// make sure we're not leaking goroutines
+	grtracker := grtrack.Start()
+	defer grtracker.Check(t)
 
 	dev, err := TUNDevice("", addr, "255.255.255.0", 1500)
 	if err != nil {
