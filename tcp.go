@@ -2,13 +2,15 @@ package ipproxy
 
 import (
 	"context"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"sync"
 
-	"github.com/google/netstack/tcpip"
-	"github.com/google/netstack/tcpip/buffer"
-	"github.com/google/netstack/tcpip/network/ipv4"
-	"github.com/google/netstack/tcpip/transport/tcp"
-	"github.com/google/netstack/waiter"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/waiter"
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/eventual"
@@ -27,16 +29,16 @@ func (p *proxy) onTCP(pkt ipPacket) {
 		p.tcpOrigins[dstAddr] = o
 		p.addTCPOrigin()
 	}
-	o.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, tcpip.PacketBuffer{
-		Data: buffer.View(pkt.raw).ToVectorisedView(),
-	})
+	o.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, stack.NewPacketBuffer(stack.PacketBufferOptions{
+		Data: buffer.View(pkt.raw).ToVectorisedView()},
+	))
 }
 
 func (p *proxy) createTCPOrigin(dstAddr addr) (*tcpOrigin, error) {
 	o := &tcpOrigin{
 		conns: make(map[tcpip.FullAddress]*baseConn),
 	}
-	o.origin = *newOrigin(p, tcp.NewProtocol(), dstAddr, nil, func(_o *origin) error {
+	o.origin = *newOrigin(p, tcp.NewProtocol, dstAddr, nil, func(_o *origin) error {
 		o.closeAllConns()
 		return nil
 	})
@@ -45,10 +47,10 @@ func (p *proxy) createTCPOrigin(dstAddr addr) (*tcpOrigin, error) {
 		o.closeNow()
 		return nil, errors.New("Unable to initialize TCP origin: %v", err)
 	}
-	if pErr := o.stack.SetPromiscuousMode(nicID, true); pErr != nil {
-		o.closeNow()
-		return nil, errors.New("Unable to set NIC to promiscuous mode: %v", pErr)
-	}
+
+	o.stack.SetRouteTable([]tcpip.Route{
+		{Destination: header.IPv4EmptySubnet, NIC: nicID},
+	})
 
 	if err := o.ep.Listen(p.opts.TCPConnectBacklog); err != nil {
 		o.closeNow()
@@ -63,9 +65,9 @@ func acceptTCP(o *tcpOrigin) {
 	defer o.closeNow()
 
 	for {
-		acceptedEp, wq, err := o.ep.Accept()
+		acceptedEp, wq, err := o.ep.Accept(nil)
 		if err != nil {
-			if err == tcpip.ErrWouldBlock {
+			if _, ok := err.(*tcpip.ErrWouldBlock); ok {
 				select {
 				case <-o.closeCh:
 					return
@@ -97,7 +99,7 @@ func (o *tcpOrigin) onAccept(acceptedEp tcpip.Endpoint, wq *waiter.Queue) {
 		return nil
 	})
 	tcpConn.ep = acceptedEp
-	go tcpConn.copyToUpstream(nil)
+	go tcpConn.copyToUpstream()
 	go tcpConn.copyFromUpstream(tcpip.WriteOptions{})
 	o.addConn(downstreamAddr, tcpConn)
 }
