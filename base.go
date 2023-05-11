@@ -53,6 +53,13 @@ func newBaseConn(p *proxy, upstream eventual.Value, wq *waiter.Queue, finalizer 
 	}
 
 	conn.finalizer = func() (err error) {
+		defer func() {
+			p := recover()
+			if p != nil {
+				log.Errorf("panic in finalizer: %v", p)
+			}
+		}()
+
 		if finalizer != nil {
 			err = finalizer()
 		}
@@ -266,6 +273,7 @@ func (o *origin) init(transportProtocol tcpip.TransportProtocolNumber, bindAddr 
 
 	var epErr *tcpip.Error
 	if o.ep, epErr = o.stack.NewEndpoint(transportProtocol, o.p.proto, o.wq); epErr != nil {
+		o.ep = nil
 		return errors.New("Unable to create endpoint: %v", epErr)
 	}
 
