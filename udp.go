@@ -90,9 +90,7 @@ type udpConn struct {
 }
 
 func (p *proxy) reapUDP() {
-	log.Debugf("Reaping UDP connections")
 	for ft, conn := range p.udpConns {
-		log.Debugf("Reap %v? %v > %v ?", ft, conn.timeSinceLastActive(), p.opts.IdleTimeout)
 		if conn.timeSinceLastActive() > p.opts.IdleTimeout {
 			go conn.closeNow()
 			delete(p.udpConns, ft)
