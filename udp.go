@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/google/netstack/tcpip"
-	"github.com/google/netstack/tcpip/buffer"
-	"github.com/google/netstack/tcpip/network/ipv4"
-	"github.com/google/netstack/tcpip/transport/udp"
+	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/eventual"
@@ -27,18 +28,20 @@ func (p *proxy) onUDP(pkt ipPacket) {
 		p.udpConns[ft] = conn
 		p.addUDPConn()
 	}
-
-	conn.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, tcpip.PacketBuffer{
-		Data: buffer.View(pkt.raw).ToVectorisedView(),
+	inboundPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		Payload: buffer.MakeWithData(pkt.raw),
 	})
+	defer inboundPkt.DecRef()
+	conn.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, inboundPkt)
 }
 
 func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 	upstreamValue := eventual.NewValue()
-	downstreamIPAddr := tcpip.Address(net.ParseIP(ft.src.ip).To4())
+
+	downstreamIPAddr := tcpip.AddrFrom4([4]byte(net.ParseIP(ft.src.ip).To4()))
 
 	conn := &udpConn{
-		origin: *newOrigin(p, udp.NewProtocol(), ft.dst, upstreamValue, func(o *origin) error {
+		origin: *newOrigin(p, udp.NewProtocol, ft.dst, upstreamValue, func(o *origin) error {
 			return nil
 		}),
 		ft: ft,
@@ -55,29 +58,29 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 		upstreamValue.Set(upstream)
 	}()
 
-	if err := conn.init(udp.ProtocolNumber, tcpip.FullAddress{nicID, "", ft.dst.port}); err != nil {
+	if err := conn.init(udp.ProtocolNumber, tcpip.FullAddress{NIC: nicID, Port: ft.dst.port}); err != nil {
 		conn.closeNow()
 		return nil, errors.New("Unable to initialize UDP connection for %v: %v", ft, err)
 	}
 
 	// to our NIC and routes packets to the downstreamIPAddr as well,
-	upstreamSubnet, _ := tcpip.NewSubnet(conn.ipAddr, tcpip.AddressMask(conn.ipAddr))
-	downstreamSubnet, _ := tcpip.NewSubnet(downstreamIPAddr, tcpip.AddressMask(downstreamIPAddr))
+
+	upstreamSubnet, _ := tcpip.NewSubnet(conn.ipAddr, tcpip.MaskFromBytes(conn.ipAddr.AsSlice()))
+	downstreamSubnet, _ := tcpip.NewSubnet(downstreamIPAddr, tcpip.MaskFromBytes(downstreamIPAddr.AsSlice()))
+
 	conn.stack.SetRouteTable([]tcpip.Route{
 		{
 			Destination: upstreamSubnet,
-			Gateway:     "",
 			NIC:         nicID,
 		},
 		{
 			Destination: downstreamSubnet,
-			Gateway:     "",
 			NIC:         nicID,
 		},
 	})
 
-	go conn.copyToUpstream(&tcpip.FullAddress{0, "", ft.dst.port})
-	go conn.copyFromUpstream(tcpip.WriteOptions{To: &tcpip.FullAddress{0, downstreamIPAddr, ft.src.port}})
+	go conn.copyToUpstream()
+	go conn.copyFromUpstream(tcpip.WriteOptions{To: &tcpip.FullAddress{NIC: nicID, Addr: downstreamIPAddr, Port: ft.src.port}})
 	return conn, nil
 }
 
@@ -87,7 +90,9 @@ type udpConn struct {
 }
 
 func (p *proxy) reapUDP() {
+	log.Debugf("Reaping UDP connections")
 	for ft, conn := range p.udpConns {
+		log.Debugf("Reap %v? %v > %v ?", ft, conn.timeSinceLastActive(), p.opts.IdleTimeout)
 		if conn.timeSinceLastActive() > p.opts.IdleTimeout {
 			go conn.closeNow()
 			delete(p.udpConns, ft)

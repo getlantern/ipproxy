@@ -1,19 +1,32 @@
 module github.com/getlantern/ipproxy
 
-go 1.12
+go 1.21.1
+
+toolchain go1.21.3
 
 require (
-	github.com/aristanetworks/goarista v0.0.0-20190429220743-799535f6f364 // indirect
 	github.com/getlantern/errors v1.0.1
 	github.com/getlantern/eventual v0.0.0-20180125201821-84b02499361b
 	github.com/getlantern/fdcount v0.0.0-20170105153814-6a6cb5839bc5
 	github.com/getlantern/golog v0.0.0-20200929154820-62107891371a
-	github.com/getlantern/grtrack v0.0.0-20160824195228-cbf67d3fa0fd // indirect
-	github.com/getlantern/mtime v0.0.0-20170117193331-ba114e4a82b0 // indirect
-	github.com/google/netstack v0.0.0-00010101000000-000000000000
 	github.com/songgao/water v0.0.0-20190725173103-fd331bda3f4b
-	github.com/stretchr/testify v1.3.0
-	golang.org/x/sys v0.0.0-20200929083018-4d22bbb62b3c // indirect
+	github.com/stretchr/testify v1.8.1
+	gvisor.dev/gvisor v0.0.0-20231216175137-0e649a1ce9ad
 )
 
-replace github.com/google/netstack => github.com/getlantern/netstack v0.0.0-20200930032729-4d26a3d146e1
+require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/getlantern/context v0.0.0-20190109183933-c447772a6520 // indirect
+	github.com/getlantern/grtrack v0.0.0-20160824195228-cbf67d3fa0fd // indirect
+	github.com/getlantern/hex v0.0.0-20190417191902-c6586a6fe0b7 // indirect
+	github.com/getlantern/hidden v0.0.0-20190325191715-f02dbb02be55 // indirect
+	github.com/getlantern/mtime v0.0.0-20200417132445-23682092d1f7 // indirect
+	github.com/getlantern/ops v0.0.0-20190325191751-d70cb0d6f85f // indirect
+	github.com/go-stack/stack v1.8.0 // indirect
+	github.com/google/btree v1.1.2 // indirect
+	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	golang.org/x/sys v0.13.0 // indirect
+	golang.org/x/time v0.3.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+)

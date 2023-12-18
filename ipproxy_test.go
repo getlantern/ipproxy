@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/getlantern/fdcount"
-
 	"github.com/stretchr/testify/assert"
 )
 
