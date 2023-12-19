@@ -11,8 +11,6 @@ import (
 
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 
-	"github.com/getlantern/errors"
-	"github.com/getlantern/golog"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
@@ -20,6 +18,9 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
+
+	"github.com/getlantern/errors"
+	"github.com/getlantern/golog"
 )
 
 var (
@@ -140,9 +141,6 @@ type proxy struct {
 
 	toDownstream chan stack.PacketBufferPtr
 
-	context       context.Context
-	cancelContext context.CancelFunc
-
 	closeable
 }
 
@@ -152,7 +150,14 @@ func (p *proxy) Serve() error {
 		return err
 	}
 
+	serveCtx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-p.closeCh
+		cancel()
+	}()
+
 	go p.trackStats()
+	go p.copyToDownstream(serveCtx, icmpEndpoint)
 	go p.copyFromUpstream()
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -163,27 +168,19 @@ func (p *proxy) Serve() error {
 func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 	// Default options
 	opts = opts.ApplyDefaults()
-	ctx, cancelContext := context.WithCancel(context.Background())
 	p := &proxy{
-		opts:          opts,
-		proto:         ipv4.ProtocolNumber,
-		downstream:    downstream,
-		pktIn:         make(chan ipPacket, 1000),
-		tcpOrigins:    make(map[addr]*tcpOrigin, 0),
-		udpConns:      make(map[fourtuple]*udpConn, 0),
-		toDownstream:  make(chan stack.PacketBufferPtr),
-		context:       ctx,
-		cancelContext: cancelContext,
+		opts:         opts,
+		proto:        ipv4.ProtocolNumber,
+		downstream:   downstream,
+		pktIn:        make(chan ipPacket, 1000),
+		tcpOrigins:   make(map[addr]*tcpOrigin, 0),
+		udpConns:     make(map[fourtuple]*udpConn, 0),
+		toDownstream: make(chan stack.PacketBufferPtr),
 		closeable: closeable{
 			closeCh:           make(chan struct{}),
 			readyToFinalizeCh: make(chan struct{}),
 			closedCh:          make(chan struct{}),
 		},
-	}
-
-	p.finalizer = func() error {
-		p.cancelContext()
-		return nil
 	}
 
 	return p, nil
@@ -277,6 +274,24 @@ func (p *proxy) copyFromUpstream() {
 	}
 }
 
+func (p *proxy) copyToDownstream(ctx context.Context, channelEndpoint *channel.Endpoint) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			if ptr := channelEndpoint.ReadContext(ctx); ptr != nil {
+				select {
+				case <-ctx.Done():
+					return
+				case p.toDownstream <- ptr.Clone():
+					continue
+				}
+			}
+		}
+	}
+}
+
 func (p *proxy) stackForICMP() (*stack.Stack, *channel.Endpoint, error) {
 	channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
 	s := stack.New(stack.Options{
@@ -290,22 +305,5 @@ func (p *proxy) stackForICMP() (*stack.Stack, *channel.Endpoint, error) {
 	s.SetRouteTable([]tcpip.Route{
 		{Destination: header.IPv4EmptySubnet, NIC: nicID},
 	})
-	go func() {
-		for {
-			select {
-			case <-p.closedCh:
-				return
-			default:
-				if ptr := channelEndpoint.ReadContext(p.context); ptr != nil {
-					select {
-					case p.toDownstream <- ptr.Clone():
-						continue
-					default:
-						return
-					}
-				}
-			}
-		}
-	}()
 	return s, channelEndpoint, nil
 }
