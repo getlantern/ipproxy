@@ -26,15 +26,13 @@ const (
 )
 
 type baseConn struct {
-	lastActive    int64
-	p             *proxy
-	upstream      eventual.Value
-	ep            tcpip.Endpoint
-	wq            *waiter.Queue
-	waitEntry     *waiter.Entry
-	notifyCh      chan struct{}
-	context       context.Context
-	cancelContext context.CancelFunc
+	lastActive int64
+	p          *proxy
+	upstream   eventual.Value
+	ep         tcpip.Endpoint
+	wq         *waiter.Queue
+	waitEntry  *waiter.Entry
+	notifyCh   chan struct{}
 
 	closeable
 }
@@ -42,15 +40,12 @@ type baseConn struct {
 func newBaseConn(p *proxy, upstream eventual.Value, wq *waiter.Queue, finalizer func() error) *baseConn {
 	waitEntry, notifyCh := waiter.NewChannelEntry(waiter.EventIn)
 	wq.EventRegister(&waitEntry)
-	ctx, cancelContext := context.WithCancel(context.Background())
 	conn := &baseConn{
-		p:             p,
-		upstream:      upstream,
-		wq:            wq,
-		waitEntry:     &waitEntry,
-		notifyCh:      notifyCh,
-		context:       ctx,
-		cancelContext: cancelContext,
+		p:         p,
+		upstream:  upstream,
+		wq:        wq,
+		waitEntry: &waitEntry,
+		notifyCh:  notifyCh,
 		closeable: closeable{
 			closeCh:           make(chan struct{}),
 			readyToFinalizeCh: make(chan struct{}),
@@ -79,7 +74,6 @@ func newBaseConn(p *proxy, upstream eventual.Value, wq *waiter.Queue, finalizer 
 		}
 
 		conn.wq.EventUnregister(conn.waitEntry)
-		conn.cancelContext()
 
 		if conn.ep != nil {
 			conn.ep.Close()
@@ -231,7 +225,11 @@ func newOrigin(p *proxy, transportProtocol stack.TransportProtocolFactory, addr 
 		stack:           s,
 		channelEndpoint: channelEndpoint,
 	}
+
+	connectionCtx, cancelConnectionCtx := context.WithCancel(context.Background())
+
 	o.baseConn = newBaseConn(p, upstream, &waiter.Queue{}, func() (err error) {
+		cancelConnectionCtx()
 		if finalizer != nil {
 			err = finalizer(o)
 		}
@@ -243,7 +241,7 @@ func newOrigin(p *proxy, transportProtocol stack.TransportProtocolFactory, addr 
 		return
 	})
 
-	go o.copyToDownstream()
+	go o.copyToDownstream(connectionCtx)
 	return o
 }
 
@@ -255,13 +253,13 @@ type origin struct {
 	channelEndpoint *channel.Endpoint
 }
 
-func (o *origin) copyToDownstream() {
+func (o *origin) copyToDownstream(ctx context.Context) {
 	for {
 		select {
-		case <-o.closedCh:
+		case <-ctx.Done():
 			return
 		default:
-			if ptr := o.channelEndpoint.ReadContext(o.context); ptr != nil {
+			if ptr := o.channelEndpoint.ReadContext(ctx); ptr != nil {
 				select {
 				case o.p.toDownstream <- ptr.Clone():
 					continue
