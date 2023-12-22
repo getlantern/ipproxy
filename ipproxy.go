@@ -259,7 +259,6 @@ func (p *proxy) copyFromUpstream() {
 			return
 		case pktInfo := <-p.toDownstream:
 			pkt := make([]byte, 0, p.opts.MTU)
-			pkt = append(pkt, pktInfo.LinkHeader().Slice()...)
 			for _, view := range pktInfo.AsSlices() {
 				pkt = append(pkt, view...)
 			}
@@ -305,5 +304,8 @@ func (p *proxy) stackForICMP() (*stack.Stack, *channel.Endpoint, error) {
 	s.SetRouteTable([]tcpip.Route{
 		{Destination: header.IPv4EmptySubnet, NIC: nicID},
 	})
+	if err := s.SetPromiscuousMode(nicID, true); err != nil {
+		return nil, nil, errors.New("Unable to set promiscuous mode: %v", err)
+	}
 	return s, channelEndpoint, nil
 }

@@ -108,8 +108,10 @@ func (conn *baseConn) copyToUpstream() {
 
 	var b bytes.Buffer
 	for {
-		_, readErr := conn.ep.Read(&b, tcpip.ReadOptions{})
-		if b.Len() > 0 {
+		res, readErr := conn.ep.Read(&b, tcpip.ReadOptions{})
+
+		if res.Count > 0 {
+			b.Truncate(res.Count)
 			if _, writeErr := upstream.Write(b.Bytes()); writeErr != nil {
 				log.Errorf("Unexpected error writing to upstream: %v", writeErr)
 				return
@@ -179,8 +181,9 @@ func (conn *baseConn) copyFromUpstream(responseOptions tcpip.WriteOptions) {
 
 func (conn *baseConn) writeToDownstream(b []byte, responseOptions tcpip.WriteOptions) *tcpip.Error {
 	// write in a loop since partial writes are a possibility
+	buf := bytes.NewBuffer(b)
 	for i := time.Duration(0); true; i++ {
-		n, writeErr := conn.ep.Write(bytes.NewBuffer(b), responseOptions)
+		n, writeErr := conn.ep.Write(buf, responseOptions)
 		if writeErr != nil {
 			if _, ok := writeErr.(*tcpip.ErrWouldBlock); ok {
 				// back off and retry
@@ -195,10 +198,8 @@ func (conn *baseConn) writeToDownstream(b []byte, responseOptions tcpip.WriteOpt
 			}
 			return &writeErr
 		}
-		b = b[n:]
-		if len(b) == 0 {
-			// done writing
-			return nil
+		if n == 0 {
+			break
 		}
 	}
 	return nil
@@ -275,6 +276,10 @@ func (o *origin) copyToDownstream(ctx context.Context) {
 func (o *origin) init(transportProtocol tcpip.TransportProtocolNumber, bindAddr tcpip.FullAddress) error {
 	if err := o.stack.CreateNIC(nicID, o.channelEndpoint); err != nil {
 		return errors.New("Unable to create TCP NIC: %v", err)
+	}
+
+	if err := o.stack.SetPromiscuousMode(nicID, true); err != nil {
+		return errors.New("Unable to set promiscuous mode: %v", err)
 	}
 
 	if aErr := o.stack.AddProtocolAddress(nicID, tcpip.ProtocolAddress{Protocol: o.p.proto, AddressWithPrefix: o.ipAddr.WithPrefix()}, stack.AddressProperties{}); aErr != nil {
