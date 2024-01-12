@@ -105,13 +105,11 @@ func (conn *baseConn) copyToUpstream() {
 	if upstream == nil {
 		return
 	}
-
-	var b bytes.Buffer
 	for {
+		var b bytes.Buffer
 		res, readErr := conn.ep.Read(&b, tcpip.ReadOptions{})
 
 		if res.Count > 0 {
-			b.Truncate(res.Count)
 			if _, writeErr := upstream.Write(b.Bytes()); writeErr != nil {
 				log.Errorf("Unexpected error writing to upstream: %v", writeErr)
 				return
