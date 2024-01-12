@@ -11,7 +11,7 @@ require (
 	github.com/getlantern/golog v0.0.0-20200929154820-62107891371a
 	github.com/songgao/water v0.0.0-20190725173103-fd331bda3f4b
 	github.com/stretchr/testify v1.8.1
-	gvisor.dev/gvisor v0.0.0-20231216175137-0e649a1ce9ad
+	gvisor.dev/gvisor v0.0.0-20240111192755-20d559651a70
 )
 
 require (
