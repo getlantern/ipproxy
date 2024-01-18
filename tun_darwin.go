@@ -13,21 +13,11 @@ import (
 )
 
 func isIPv4(ip net.IP) bool {
-	if ip.To4() != nil {
-		return true
-	}
-	return false
+	return ip.To4() != nil
 }
 
 func isIPv6(ip net.IP) bool {
-	// To16() also valid for ipv4, ensure it's not an ipv4 address
-	if ip.To4() != nil {
-		return false
-	}
-	if ip.To16() != nil {
-		return true
-	}
-	return false
+	return ip.To4() == nil && ip.To16() != nil
 }
 
 // TUNDevice creates a TUN device with the given name and configures an interface for that TUN device
