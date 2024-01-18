@@ -3,6 +3,7 @@
 package ipproxy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -12,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
@@ -61,6 +62,8 @@ type Opts struct {
 	// StatsInterval controls how frequently to display stats. Defaults to 15
 	// seconds.
 	StatsInterval time.Duration
+
+	DNSGrabAddr string
 
 	// DialTCP specifies a function for dialing upstream TCP connections. Defaults
 	// to net.Dialer.DialContext().
@@ -124,7 +127,7 @@ type Proxy interface {
 
 	// Close shuts down the proxy in an orderly fashion and blocks until shutdown
 	// is complete.
-	Close() error
+ 	Close() error
 }
 
 type proxy struct {
@@ -139,7 +142,6 @@ type proxy struct {
 	downstream io.ReadWriter
 
 	pktIn      chan ipPacket
-	tcpOrigins map[netip.AddrPort]*tcpOrigin
 
 	ipstack *stack.Stack
 	linkEP    *channel.Endpoint
@@ -148,10 +150,14 @@ type proxy struct {
 
 	atomicIsLocalIPFunc atomic.Value /*func(netip.Addr) bool]*/
 
+	mu sync.Mutex
+	connsOpenBySubnetIP map[netip.Addr]int
+
 	closeable
 }
 
 func (p *proxy) Serve() error {
+	log.Debug("ipproxy serving traffic")
 	p.ipstack = stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
@@ -159,17 +165,25 @@ func (p *proxy) Serve() error {
 	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
 	err := p.ipstack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
 	if err != nil {
+		log.Errorf("could not enable TCP SACK: %v", err)
 		return fmt.Errorf("could not enable TCP SACK: %v", err)
 	}
 	p.linkEP = channel.New(512, uint32(p.opts.MTU), "")
 	if err := p.ipstack.CreateNIC(nicID, p.linkEP); err != nil {
+		log.Errorf("could not create netstack NIC: %v", err)
 		return fmt.Errorf("could not create netstack NIC: %v", err)
 	}
 	if err := p.ipstack.SetPromiscuousMode(nicID, true); err != nil {
+		log.Errorf("Unable to set promiscuous mode: %v", err)
 		return errors.New("Unable to set promiscuous mode: %v", err)
 	}
+	ipv4Subnet, tcpipErr := tcpip.NewSubnet(tcpip.AddrFromSlice(make([]byte, 4)), tcpip.MaskFromBytes(make([]byte, 4)))
+	if tcpipErr != nil {
+		log.Errorf("could not create IPv4 subnet: %v", err)
+		return fmt.Errorf("could not create IPv4 subnet: %v", err)
+	}
 	p.ipstack.SetRouteTable([]tcpip.Route{
-		{Destination: header.IPv4EmptySubnet, NIC: nicID},
+		{Destination: ipv4Subnet, NIC: nicID},
 	})
 	const tcpReceiveBufferSize = 0
 	const maxInFlightConnectionAttempts = 1024
@@ -177,25 +191,9 @@ func (p *proxy) Serve() error {
 	udpFwd := udp.NewForwarder(p.ipstack, p.onUDP)
 	p.ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, p.wrapProtoHandler(tcpFwd.HandlePacket))
 	p.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, p.wrapProtoHandler(udpFwd.HandlePacket))
-	return p.inject()
-	/*icmpStack, icmpEndpoint, err := p.stackForICMP()
-	if err != nil {
-		return err
-	}
-
-	serveCtx, cancel := context.WithCancel(context.Background())
-	go func() {
-		<-p.closeCh
-		cancel()
-	}()
-
-	go p.trackStats()
-	go p.copyToDownstream(serveCtx, icmpEndpoint)
-	go p.copyFromUpstream()
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go p.copyToUpstream(icmpStack, icmpEndpoint, &wg)
-	return p.readDownstreamPackets(&wg)*/
+	return p.readDownstreamPackets(&wg)
 }
 
 func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
@@ -206,7 +204,7 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		proto:        ipv4.ProtocolNumber,
 		downstream:   downstream,
 		pktIn:        make(chan ipPacket, 1000),
-		tcpOrigins:   make(map[netip.AddrPort]*tcpOrigin),
+		connsOpenBySubnetIP: make(map[netip.Addr]int),
 		closeable: closeable{
 			closeCh:           make(chan struct{}),
 			readyToFinalizeCh: make(chan struct{}),
@@ -217,7 +215,7 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 	return p, nil
 }
 
-var PrivateIPNetworks = []net.IPNet{
+var privateIPNetworks = []net.IPNet{
 	net.IPNet{
 		IP:   net.ParseIP("10.0.0.0"),
 		Mask: net.CIDRMask(8, 32),
@@ -233,7 +231,7 @@ var PrivateIPNetworks = []net.IPNet{
 }
 
 func isLocalIP(ip net.IP) bool {
-	for _, ipNet := range PrivateIPNetworks {
+	for _, ipNet := range privateIPNetworks {
 		if ipNet.Contains(ip) {
 			return true
 		}
@@ -258,6 +256,16 @@ func (p *proxy) wrapProtoHandler(h func(stack.TransportEndpointID, stack.PacketB
 }
 
 func (p *proxy) addSubnetAddress(ip netip.Addr) {
+
+	p.mu.Lock()
+	p.connsOpenBySubnetIP[ip]++
+	needAdd := p.connsOpenBySubnetIP[ip] == 1
+	p.mu.Unlock()
+
+	if !needAdd {
+		return
+	}
+
 	pa := tcpip.ProtocolAddress{
 		AddressWithPrefix: tcpip.AddrFromSlice(ip.AsSlice()).WithPrefix(),
 	}
@@ -272,7 +280,32 @@ func (p *proxy) addSubnetAddress(ip netip.Addr) {
 	})
 }
 
+func (p *proxy) readDownstreamPackets(wg *sync.WaitGroup) (finalErr error) {
+	defer wg.Wait() // wait for copyToUpstream to finish with all of its cleanup
+	defer p.closeNow()
+
+	for {
+		// we can't reuse this byte slice across reads because each one is held in
+		// memory by the tcpip stack.
+		b := make([]byte, p.opts.MTU)
+		n, err := p.downstream.Read(b)
+		if err != nil {
+			if err == io.EOF {
+				return err
+			}
+			return errors.New("Unexpected error reading from downstream: %v", err)
+		}
+		raw := b[:n]
+		packetBuf := stack.NewPacketBuffer(stack.PacketBufferOptions{
+			Payload: buffer.MakeWithData(bytes.Clone(raw)),
+		})
+		p.linkEP.InjectInbound(p.proto, packetBuf)
+		packetBuf.DecRef()
+	}
+}
+
 func (p *proxy) inject() error {
+	log.Debug("injecting packets")
 	ctx := context.Background()
 	for {
 		pkt := p.linkEP.ReadContext(ctx)
@@ -292,50 +325,3 @@ func (p *proxy) inject() error {
 	return nil
 }
 
-
-func (p *proxy) readDownstreamPackets(wg *sync.WaitGroup) (finalErr error) {
-	defer wg.Wait() // wait for copyToUpstream to finish with all of its cleanup
-	defer p.closeNow()
-
-	for {
-		// we can't reuse this byte slice across reads because each one is held in
-		// memory by the tcpip stack.
-		b := make([]byte, p.opts.MTU)
-		n, err := p.downstream.Read(b)
-		if err != nil {
-			if err == io.EOF {
-				return err
-			}
-			return errors.New("Unexpected error reading from downstream: %v", err)
-		}
-		raw := b[:n]
-		pkt, err := parseIPPacket(raw)
-		if err != nil {
-			log.Debugf("Error on inbound packet, ignoring: %v", err)
-			p.rejectedPacket()
-			continue
-		}
-
-		p.pktIn <- pkt
-	}
-}
-
-func (p *proxy) stackForICMP() (*stack.Stack, *channel.Endpoint, error) {
-	channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
-	s := stack.New(stack.Options{
-		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
-	})
-	if err := s.CreateNIC(nicID, channelEndpoint); err != nil {
-		s.Close()
-		return nil, nil, errors.New("Unable to create ICMP NIC: %v", err)
-	}
-
-	s.SetRouteTable([]tcpip.Route{
-		{Destination: header.IPv4EmptySubnet, NIC: nicID},
-	})
-	if err := s.SetPromiscuousMode(nicID, true); err != nil {
-		return nil, nil, errors.New("Unable to set promiscuous mode: %v", err)
-	}
-	return s, channelEndpoint, nil
-}

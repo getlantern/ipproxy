@@ -2,6 +2,7 @@ package ipproxy
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/waiter"
+	"github.com/miekg/dns"
 )
 
 const maxUDPPacketSize = 64 << 10
@@ -31,6 +33,7 @@ func ipPortOfNetstackAddr(a tcpip.Address, port uint16) (ipp netip.AddrPort, ok 
 
 func (p *proxy) onUDP(r *udp.ForwarderRequest) {
 	sess := r.ID()
+	log.Debugf("UDP ForwarderRequest: %v", stringifyTEI(sess))
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq)
 	if err != nil {
@@ -46,6 +49,10 @@ func (p *proxy) onUDP(r *udp.ForwarderRequest) {
 	if !ok {
 		ep.Close()
 		return
+	}
+
+	if dstAddr.Port() == 53 {
+		log.Debugf("dns request. addr is %s", dstAddr.Addr().String())
 	}
 
 	c := gonet.NewUDPConn(&wq, ep)
@@ -68,6 +75,70 @@ func (p *proxy) onUDP(r *udp.ForwarderRequest) {
 	})
 	defer inboundPkt.DecRef()
 	conn.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, inboundPkt)*/
+}
+
+func translateDNSQuestion(addr *net.UDPAddr, dnsMsg *dns.Msg) (string, error) {
+	var atype string
+	qtype := dnsMsg.Question[0].Qtype
+	switch qtype {
+	case dns.TypeA:
+		atype = "A"
+	case dns.TypeAAAA:
+		atype = "AAAA"
+	case dns.TypeNS:
+		atype = "NS"
+	default:
+		str := fmt.Sprintf("%s: invalid qtype: %d", addr, dnsMsg.Question[0].Qtype)
+		log.Debug(str)
+		return "", fmt.Errorf("%s", str)
+	}
+	return atype, nil
+}
+
+func (p *proxy) handleDNSUDP(srcAddr netip.AddrPort, c *gonet.UDPConn) {
+	const readDeadline = 150 * time.Millisecond
+
+	defer c.Close()
+
+	bufp := udpBufPool.Get().(*[]byte)
+	defer udpBufPool.Put(bufp)
+	q := *bufp
+
+	for {
+		c.SetReadDeadline(time.Now().Add(readDeadline))
+		n, _, err := c.ReadFrom(q)
+		if err != nil {
+			if oe, ok := err.(*net.OpError); !(ok && oe.Timeout()) {
+				log.Errorf("dns udp read: %v", err) // log non-timeout errors
+			}
+			return
+		}
+
+		raddr, err := net.ResolveUDPAddr("udp", "8.8.8.8:53")
+		if err != nil {
+			log.Error(err)
+			return
+		}
+
+		upstream, err := net.DialUDP("udp", nil, raddr)
+		if err != nil {
+			log.Error(err)
+			return
+		}
+		_, err = upstream.Write(q[:n])
+		if err != nil {
+			log.Error(err)
+			return
+		}
+
+		ret := make([]byte, 4096)
+		_, _, err = upstream.ReadFromUDP(ret)
+		if err != nil {
+			log.Error(err)
+			return
+		}
+		c.Write(ret)
+	}
 }
 
 func (p *proxy) forwardUDP(client *gonet.UDPConn, clientAddr, dstAddr netip.AddrPort) {
@@ -118,6 +189,10 @@ func (p *proxy) forwardUDP(client *gonet.UDPConn, clientAddr, dstAddr netip.Addr
 	}
 	startPacketCopy(ctx, cancel, client, net.UDPAddrFromAddrPort(clientAddr), backendConn, extend)
 	startPacketCopy(ctx, cancel, backendConn, backendRemoteAddr, client, extend)
+	if isLocal {
+		<-ctx.Done()
+		p.removeSubnetAddress(dstAddr.Addr())
+	}
 }
 
 func startPacketCopy(ctx context.Context, cancel context.CancelFunc, dst net.PacketConn, dstAddr net.Addr, src net.PacketConn, extend func()) {
