@@ -84,7 +84,7 @@ func main() {
 		}()
 	}
 
-	dev, err := ipproxy.TUNDevice(*tunDevice, *tunAddr, *tunMask, 1500)
+	dev, err := ipproxy.TUNDevice(*tunDevice, *tunAddr, *tunGW, *tunMask, 1500)
 	if err != nil {
 		log.Fatalf("error opening TUN device: %v", err)
 	}
