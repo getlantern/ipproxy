@@ -2,7 +2,6 @@ package ipproxy
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -12,7 +11,6 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/waiter"
-	"github.com/miekg/dns"
 )
 
 const maxUDPPacketSize = 64 << 10
@@ -53,47 +51,15 @@ func (p *proxy) onUDP(r *udp.ForwarderRequest) {
 
 	if dstAddr.Port() == 53 {
 		log.Debugf("dns request. addr is %s", dstAddr.Addr().String())
+		c := gonet.NewUDPConn(&wq, ep)
+		go p.handleDNSUDP(srcAddr, c)
+		return
 	}
 
 	c := gonet.NewUDPConn(&wq, ep)
 	go p.forwardUDP(c, srcAddr, dstAddr)
-
-	/*ft := pkt.ft()
-	conn := p.udpConns[ft]
-	if conn == nil {
-		var err error
-		conn, err = p.startUDPConn(ft)
-		if err != nil {
-			log.Error(err)
-			return
-		}
-		p.udpConns[ft] = conn
-		p.addUDPConn()
-	}
-	inboundPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: buffer.MakeWithData(pkt.raw),
-	})
-	defer inboundPkt.DecRef()
-	conn.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, inboundPkt)*/
 }
 
-func translateDNSQuestion(addr *net.UDPAddr, dnsMsg *dns.Msg) (string, error) {
-	var atype string
-	qtype := dnsMsg.Question[0].Qtype
-	switch qtype {
-	case dns.TypeA:
-		atype = "A"
-	case dns.TypeAAAA:
-		atype = "AAAA"
-	case dns.TypeNS:
-		atype = "NS"
-	default:
-		str := fmt.Sprintf("%s: invalid qtype: %d", addr, dnsMsg.Question[0].Qtype)
-		log.Debug(str)
-		return "", fmt.Errorf("%s", str)
-	}
-	return atype, nil
-}
 
 func (p *proxy) handleDNSUDP(srcAddr netip.AddrPort, c *gonet.UDPConn) {
 	const readDeadline = 150 * time.Millisecond
@@ -114,30 +80,13 @@ func (p *proxy) handleDNSUDP(srcAddr netip.AddrPort, c *gonet.UDPConn) {
 			return
 		}
 
-		raddr, err := net.ResolveUDPAddr("udp", "8.8.8.8:53")
+		resp, n, err := p.opts.DnsGrabServer.ProcessQuery(q[:n])
 		if err != nil {
 			log.Error(err)
 			return
 		}
 
-		upstream, err := net.DialUDP("udp", nil, raddr)
-		if err != nil {
-			log.Error(err)
-			return
-		}
-		_, err = upstream.Write(q[:n])
-		if err != nil {
-			log.Error(err)
-			return
-		}
-
-		ret := make([]byte, 4096)
-		_, _, err = upstream.ReadFromUDP(ret)
-		if err != nil {
-			log.Error(err)
-			return
-		}
-		c.Write(ret)
+		c.Write(resp[:n])
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 
+	"github.com/getlantern/dnsgrab"
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
 )
@@ -63,7 +64,7 @@ type Opts struct {
 	// seconds.
 	StatsInterval time.Duration
 
-	DNSGrabAddr string
+	DnsGrabServer dnsgrab.Server
 
 	// DialTCP specifies a function for dialing upstream TCP connections. Defaults
 	// to net.Dialer.DialContext().
@@ -302,26 +303,5 @@ func (p *proxy) readDownstreamPackets(wg *sync.WaitGroup) (finalErr error) {
 		p.linkEP.InjectInbound(p.proto, packetBuf)
 		packetBuf.DecRef()
 	}
-}
-
-func (p *proxy) inject() error {
-	log.Debug("injecting packets")
-	ctx := context.Background()
-	for {
-		pkt := p.linkEP.ReadContext(ctx)
-		if pkt.IsNil() {
-			if ctx.Err() != nil {
-				// Return without logging.
-				return ctx.Err()
-			}
-			log.Debugf("[v2] ReadContext-for-write = ok=false")
-			continue
-		}
-
-		log.Debugf("[v2] packet Write out: % x", stack.PayloadSince(pkt.NetworkHeader()))
-
-		p.linkEP.InjectInbound(ipv4.ProtocolNumber, pkt)
-	}
-	return nil
 }
 
