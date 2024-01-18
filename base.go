@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/netip"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -211,7 +212,7 @@ func (conn *baseConn) timeSinceLastActive() time.Duration {
 	return time.Duration(time.Now().UnixNano() - atomic.LoadInt64(&conn.lastActive))
 }
 
-func newOrigin(p *proxy, transportProtocol stack.TransportProtocolFactory, addr addr, upstream eventual.Value, finalizer func(o *origin) error) *origin {
+func newOrigin(p *proxy, transportProtocol stack.TransportProtocolFactory, addr netip.AddrPort, upstream eventual.Value, finalizer func(o *origin) error) *origin {
 	channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
 	s := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
@@ -220,7 +221,7 @@ func newOrigin(p *proxy, transportProtocol stack.TransportProtocolFactory, addr 
 
 	o := &origin{
 		addr:            addr,
-		ipAddr:          tcpip.AddrFrom4([4]byte(net.ParseIP(addr.ip).To4())),
+		ipAddr:          tcpip.AddrFrom4([4]byte(net.ParseIP(addr.Addr().String()).To4())),
 		stack:           s,
 		channelEndpoint: channelEndpoint,
 	}
@@ -246,7 +247,7 @@ func newOrigin(p *proxy, transportProtocol stack.TransportProtocolFactory, addr 
 
 type origin struct {
 	*baseConn
-	addr            addr
+	addr            netip.AddrPort
 	ipAddr          tcpip.Address
 	stack           *stack.Stack
 	channelEndpoint *channel.Endpoint
@@ -279,8 +280,17 @@ func (o *origin) init(transportProtocol tcpip.TransportProtocolNumber, bindAddr 
 	if err := o.stack.SetPromiscuousMode(nicID, true); err != nil {
 		return errors.New("Unable to set promiscuous mode: %v", err)
 	}
-
-	if aErr := o.stack.AddProtocolAddress(nicID, tcpip.ProtocolAddress{Protocol: o.p.proto, AddressWithPrefix: o.ipAddr.WithPrefix()}, stack.AddressProperties{}); aErr != nil {
+	tcpAddr := tcpip.ProtocolAddress{
+		Protocol: o.p.proto,
+		AddressWithPrefix: tcpip.AddressWithPrefix{
+			Address:   tcpip.AddrFromSlice(o.ipAddr.AsSlice()),
+			PrefixLen: o.ipAddr.BitLen(),
+		},
+	}
+	if aErr := o.stack.AddProtocolAddress(nicID, tcpAddr, stack.AddressProperties{
+			PEB:        stack.CanBePrimaryEndpoint,
+			ConfigType: stack.AddressConfigStatic,
+		}); aErr != nil {
 		return errors.New("Unable to assign NIC IP address: %v", aErr)
 	}
 

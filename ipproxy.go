@@ -4,17 +4,19 @@ package ipproxy
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"gvisor.dev/gvisor/pkg/tcpip/header"
-
-	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
@@ -137,16 +139,46 @@ type proxy struct {
 	downstream io.ReadWriter
 
 	pktIn      chan ipPacket
-	tcpOrigins map[addr]*tcpOrigin
-	udpConns   map[fourtuple]*udpConn
+	tcpOrigins map[netip.AddrPort]*tcpOrigin
+
+	ipstack *stack.Stack
+	linkEP    *channel.Endpoint
 
 	toDownstream chan stack.PacketBufferPtr
+
+	atomicIsLocalIPFunc atomic.Value /*func(netip.Addr) bool]*/
 
 	closeable
 }
 
 func (p *proxy) Serve() error {
-	icmpStack, icmpEndpoint, err := p.stackForICMP()
+	p.ipstack = stack.New(stack.Options{
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
+	})
+	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
+	err := p.ipstack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
+	if err != nil {
+		return fmt.Errorf("could not enable TCP SACK: %v", err)
+	}
+	p.linkEP = channel.New(512, uint32(p.opts.MTU), "")
+	if err := p.ipstack.CreateNIC(nicID, p.linkEP); err != nil {
+		return fmt.Errorf("could not create netstack NIC: %v", err)
+	}
+	if err := p.ipstack.SetPromiscuousMode(nicID, true); err != nil {
+		return errors.New("Unable to set promiscuous mode: %v", err)
+	}
+	p.ipstack.SetRouteTable([]tcpip.Route{
+		{Destination: header.IPv4EmptySubnet, NIC: nicID},
+	})
+	const tcpReceiveBufferSize = 0
+	const maxInFlightConnectionAttempts = 1024
+	tcpFwd := tcp.NewForwarder(p.ipstack, tcpReceiveBufferSize, maxInFlightConnectionAttempts, p.onTCP)
+	udpFwd := udp.NewForwarder(p.ipstack, p.onUDP)
+	p.ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, p.wrapProtoHandler(tcpFwd.HandlePacket))
+	p.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, p.wrapProtoHandler(udpFwd.HandlePacket))
+	return p.inject()
+	/*icmpStack, icmpEndpoint, err := p.stackForICMP()
 	if err != nil {
 		return err
 	}
@@ -163,7 +195,7 @@ func (p *proxy) Serve() error {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go p.copyToUpstream(icmpStack, icmpEndpoint, &wg)
-	return p.readDownstreamPackets(&wg)
+	return p.readDownstreamPackets(&wg)*/
 }
 
 func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
@@ -174,9 +206,7 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		proto:        ipv4.ProtocolNumber,
 		downstream:   downstream,
 		pktIn:        make(chan ipPacket, 1000),
-		tcpOrigins:   make(map[addr]*tcpOrigin, 0),
-		udpConns:     make(map[fourtuple]*udpConn, 0),
-		toDownstream: make(chan stack.PacketBufferPtr),
+		tcpOrigins:   make(map[netip.AddrPort]*tcpOrigin),
 		closeable: closeable{
 			closeCh:           make(chan struct{}),
 			readyToFinalizeCh: make(chan struct{}),
@@ -186,6 +216,82 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 
 	return p, nil
 }
+
+var PrivateIPNetworks = []net.IPNet{
+	net.IPNet{
+		IP:   net.ParseIP("10.0.0.0"),
+		Mask: net.CIDRMask(8, 32),
+	},
+	net.IPNet{
+		IP:   net.ParseIP("172.16.0.0"),
+		Mask: net.CIDRMask(12, 32),
+	},
+	net.IPNet{
+		IP:   net.ParseIP("192.168.0.0"),
+		Mask: net.CIDRMask(16, 32),
+	},
+}
+
+func isLocalIP(ip net.IP) bool {
+	for _, ipNet := range PrivateIPNetworks {
+		if ipNet.Contains(ip) {
+			return true
+		}
+	}
+	return ip.IsPrivate()
+}
+
+func (p *proxy) wrapProtoHandler(h func(stack.TransportEndpointID, stack.PacketBufferPtr) bool) func(stack.TransportEndpointID, stack.PacketBufferPtr) bool {
+	return func(tei stack.TransportEndpointID, pb stack.PacketBufferPtr) bool {
+		addr := tei.LocalAddress
+		ip, ok := netip.AddrFromSlice(addr.AsSlice())
+		if !ok {
+			log.Debug("netstack: could not parse local address for incoming connection")
+			return false
+		}
+		ip = ip.Unmap()
+		if !isLocalIP(net.IP(addr.AsSlice())) {
+			p.addSubnetAddress(ip)
+		}
+		return h(tei, pb)
+	}
+}
+
+func (p *proxy) addSubnetAddress(ip netip.Addr) {
+	pa := tcpip.ProtocolAddress{
+		AddressWithPrefix: tcpip.AddrFromSlice(ip.AsSlice()).WithPrefix(),
+	}
+	if ip.Is4() {
+		pa.Protocol = ipv4.ProtocolNumber
+	} else if ip.Is6() {
+		pa.Protocol = ipv6.ProtocolNumber
+	}
+	p.ipstack.AddProtocolAddress(nicID, pa, stack.AddressProperties{
+		PEB:        stack.CanBePrimaryEndpoint, // zero value default
+		ConfigType: stack.AddressConfigStatic,  // zero value default
+	})
+}
+
+func (p *proxy) inject() error {
+	ctx := context.Background()
+	for {
+		pkt := p.linkEP.ReadContext(ctx)
+		if pkt.IsNil() {
+			if ctx.Err() != nil {
+				// Return without logging.
+				return ctx.Err()
+			}
+			log.Debugf("[v2] ReadContext-for-write = ok=false")
+			continue
+		}
+
+		log.Debugf("[v2] packet Write out: % x", stack.PayloadSince(pkt.NetworkHeader()))
+
+		p.linkEP.InjectInbound(ipv4.ProtocolNumber, pkt)
+	}
+	return nil
+}
+
 
 func (p *proxy) readDownstreamPackets(wg *sync.WaitGroup) (finalErr error) {
 	defer wg.Wait() // wait for copyToUpstream to finish with all of its cleanup
@@ -211,84 +317,6 @@ func (p *proxy) readDownstreamPackets(wg *sync.WaitGroup) (finalErr error) {
 		}
 
 		p.pktIn <- pkt
-	}
-}
-
-func (p *proxy) copyToUpstream(icmpStack *stack.Stack, icmpEndpoint *channel.Endpoint, wg *sync.WaitGroup) {
-	defer wg.Done()
-	defer p.closeNow()
-	defer icmpStack.Close()
-	defer p.closeTCP()
-	defer p.closeUDP()
-
-	reapTicker := time.NewTicker(1 * time.Second)
-	defer reapTicker.Stop()
-
-	for {
-		select {
-		case pkt := <-p.pktIn:
-			switch pkt.ipProto {
-			case IPProtocolTCP:
-				p.acceptedPacket()
-				p.onTCP(pkt)
-			case IPProtocolUDP:
-				p.acceptedPacket()
-				p.onUDP(pkt)
-			case IPProtocolICMP:
-				p.acceptedPacket()
-				icmpEndpoint.InjectInbound(p.proto, stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(pkt.raw)}))
-			default:
-				p.rejectedPacket()
-				log.Debugf("Unknown IP protocol, ignoring: %v", pkt.ipProto)
-				continue
-			}
-		case <-reapTicker.C:
-			p.reapTCP()
-			p.reapUDP()
-		case <-p.closeCh:
-			return
-		}
-	}
-}
-
-func (p *proxy) copyFromUpstream() {
-	defer p.Close()
-
-	for {
-		select {
-		case <-p.closedCh:
-			return
-		case pktInfo := <-p.toDownstream:
-			pkt := make([]byte, 0, p.opts.MTU)
-			for _, view := range pktInfo.AsSlices() {
-				pkt = append(pkt, view...)
-			}
-
-			_, err := p.downstream.Write(pkt)
-			pktInfo.DecRef()
-			if err != nil {
-				log.Errorf("Unexpected error writing to downstream: %v", err)
-				return
-			}
-		}
-	}
-}
-
-func (p *proxy) copyToDownstream(ctx context.Context, channelEndpoint *channel.Endpoint) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			if ptr := channelEndpoint.ReadContext(ctx); ptr != nil {
-				select {
-				case <-ctx.Done():
-					return
-				case p.toDownstream <- ptr.Clone():
-					continue
-				}
-			}
-		}
 	}
 }
 

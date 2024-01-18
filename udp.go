@@ -2,21 +2,56 @@ package ipproxy
 
 import (
 	"context"
-	"fmt"
 	"net"
+	"net/netip"
+	"sync"
+	"time"
 
-	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
-	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
-
-	"github.com/getlantern/errors"
-	"github.com/getlantern/eventual"
+	"gvisor.dev/gvisor/pkg/waiter"
 )
 
-func (p *proxy) onUDP(pkt ipPacket) {
-	ft := pkt.ft()
+const maxUDPPacketSize = 64 << 10
+
+var udpBufPool = &sync.Pool{
+	New: func() any {
+		b := make([]byte, maxUDPPacketSize)
+		return &b
+	},
+}
+
+func ipPortOfNetstackAddr(a tcpip.Address, port uint16) (ipp netip.AddrPort, ok bool) {
+	if addr, ok := netip.AddrFromSlice(a.AsSlice()); ok {
+		return netip.AddrPortFrom(addr, port), true
+	}
+	return netip.AddrPort{}, false
+}
+
+func (p *proxy) onUDP(r *udp.ForwarderRequest) {
+	sess := r.ID()
+	var wq waiter.Queue
+	ep, err := r.CreateEndpoint(&wq)
+	if err != nil {
+		log.Errorf("onUDP: could not create endpoint: %v", err)
+		return
+	}
+	dstAddr, ok := ipPortOfNetstackAddr(sess.LocalAddress, sess.LocalPort)
+	if !ok {
+		ep.Close()
+		return
+	}
+	srcAddr, ok := ipPortOfNetstackAddr(sess.RemoteAddress, sess.RemotePort)
+	if !ok {
+		ep.Close()
+		return
+	}
+
+	c := gonet.NewUDPConn(&wq, ep)
+	go p.forwardUDP(c, srcAddr, dstAddr)
+
+	/*ft := pkt.ft()
 	conn := p.udpConns[ft]
 	if conn == nil {
 		var err error
@@ -32,82 +67,90 @@ func (p *proxy) onUDP(pkt ipPacket) {
 		Payload: buffer.MakeWithData(pkt.raw),
 	})
 	defer inboundPkt.DecRef()
-	conn.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, inboundPkt)
+	conn.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, inboundPkt)*/
 }
 
-func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
-	upstreamValue := eventual.NewValue()
-
-	downstreamIPAddr := tcpip.AddrFrom4([4]byte(net.ParseIP(ft.src.ip).To4()))
-
-	conn := &udpConn{
-		origin: *newOrigin(p, udp.NewProtocol, ft.dst, upstreamValue, func(o *origin) error {
-			return nil
-		}),
-		ft: ft,
+func (p *proxy) forwardUDP(client *gonet.UDPConn, clientAddr, dstAddr netip.AddrPort) {
+	port, srcPort := dstAddr.Port(), clientAddr.Port()
+	log.Debugf("forwarding incoming UDP connection on port %v", port)
+	var backendListenAddr *net.UDPAddr
+	var backendRemoteAddr *net.UDPAddr
+	isLocal := isLocalIP( net.IP(dstAddr.Addr().AsSlice()))
+	if isLocal {
+		backendRemoteAddr = &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: int(port)}
+		backendListenAddr = &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: int(srcPort)}
+	} else {
+		backendRemoteAddr = net.UDPAddrFromAddrPort(dstAddr)
+		if dstAddr.Addr().Is4() {
+			backendListenAddr = &net.UDPAddr{IP: net.ParseIP("0.0.0.0"), Port: int(srcPort)}
+		} else {
+			backendListenAddr = &net.UDPAddr{IP: net.ParseIP("::"), Port: int(srcPort)}
+		}
 	}
-
-	go func() {
-		upstreamAddr := fmt.Sprintf("%v:%d", ft.dst.ip, ft.dst.port)
-		upstream, err := p.opts.DialUDP(context.Background(), "udp", upstreamAddr)
+	backendConn, err := net.ListenUDP("udp", backendListenAddr)
+	if err != nil {
+		log.Errorf("netstack: could not bind local port %v: %v, trying again with random port", backendListenAddr.Port, err)
+		backendListenAddr.Port = 0
+		backendConn, err = net.ListenUDP("udp", backendListenAddr)
 		if err != nil {
-			upstreamValue.Cancel()
-			conn.closeNow()
-			log.Errorf("Unable to dial upstream %v: %v", upstreamAddr, err)
+			log.Errorf("netstack: could not create UDP socket, preventing forwarding to %v: %v", dstAddr, err)
+			return
 		}
-		upstreamValue.Set(upstream)
-	}()
-
-	if err := conn.init(udp.ProtocolNumber, tcpip.FullAddress{NIC: nicID, Port: ft.dst.port}); err != nil {
-		conn.closeNow()
-		return nil, errors.New("Unable to initialize UDP connection for %v: %v", ft, err)
 	}
-
-	// to our NIC and routes packets to the downstreamIPAddr as well
-	upstreamSubnet, err := tcpip.NewSubnet(conn.ipAddr, tcpip.MaskFromBytes(conn.ipAddr.AsSlice()))
-	if err != nil {
-		return nil, fmt.Errorf("could not create subnet: %v", err)
+	backendLocalAddr := backendConn.LocalAddr().(*net.UDPAddr)
+	backendLocalIPPort := netip.AddrPortFrom(backendListenAddr.AddrPort().Addr().Unmap().WithZone(backendLocalAddr.Zone), backendLocalAddr.AddrPort().Port())
+	if !backendLocalIPPort.IsValid() {
+		log.Debugf("could not get backend local IP:port from %v:%v", backendLocalAddr.IP, backendLocalAddr.Port)
 	}
-	downstreamSubnet, err := tcpip.NewSubnet(downstreamIPAddr, tcpip.MaskFromBytes(downstreamIPAddr.AsSlice()))
-	if err != nil {
-		return nil, fmt.Errorf("could not create subnet: %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	idleTimeout := 2 * time.Minute
+	if port == 53 {
+		idleTimeout = 30 * time.Second
 	}
-
-	conn.stack.SetRouteTable([]tcpip.Route{
-		{
-			Destination: upstreamSubnet,
-			NIC:         nicID,
-		},
-		{
-			Destination: downstreamSubnet,
-			NIC:         nicID,
-		},
+	timer := time.AfterFunc(idleTimeout, func() {
+		log.Debugf("netstack: UDP session between %s and %s timed out", backendListenAddr, backendRemoteAddr)
+		cancel()
+		client.Close()
+		backendConn.Close()
 	})
-
-	go conn.copyToUpstream()
-	go conn.copyFromUpstream(tcpip.WriteOptions{To: &tcpip.FullAddress{NIC: nicID, Addr: downstreamIPAddr, Port: ft.src.port}})
-	return conn, nil
+	extend := func() {
+		timer.Reset(idleTimeout)
+	}
+	startPacketCopy(ctx, cancel, client, net.UDPAddrFromAddrPort(clientAddr), backendConn, extend)
+	startPacketCopy(ctx, cancel, backendConn, backendRemoteAddr, client, extend)
 }
 
-type udpConn struct {
-	origin
-	ft fourtuple
-}
+func startPacketCopy(ctx context.Context, cancel context.CancelFunc, dst net.PacketConn, dstAddr net.Addr, src net.PacketConn, extend func()) {
+	log.Debugf("[v2] netstack: startPacketCopy to %v (%T) from %T", dstAddr, dst, src)
+	go func() {
+		defer cancel() // tear down the other direction's copy
 
-func (p *proxy) reapUDP() {
-	for ft, conn := range p.udpConns {
-		if conn.timeSinceLastActive() > p.opts.IdleTimeout {
-			go conn.closeNow()
-			delete(p.udpConns, ft)
-			p.removeUDPConn()
+		bufp := udpBufPool.Get().(*[]byte)
+		defer udpBufPool.Put(bufp)
+		pkt := *bufp
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				n, srcAddr, err := src.ReadFrom(pkt)
+				if err != nil {
+					if ctx.Err() == nil {
+						log.Debugf("read packet from %s failed: %v", srcAddr, err)
+					}
+					return
+				}
+				_, err = dst.WriteTo(pkt[:n], dstAddr)
+				if err != nil {
+					if ctx.Err() == nil {
+						log.Debugf("write packet to %s failed: %v", dstAddr, err)
+					}
+					return
+				}
+				log.Debugf("wrote UDP packet %s -> %s", srcAddr, dstAddr)
+				extend()
+			}
 		}
-	}
-}
-
-func (p *proxy) closeUDP() {
-	for ft, conn := range p.udpConns {
-		conn.closeNow()
-		delete(p.udpConns, ft)
-		p.removeUDPConn()
-	}
+	}()
 }
