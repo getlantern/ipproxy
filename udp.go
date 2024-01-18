@@ -63,10 +63,15 @@ func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
 		return nil, errors.New("Unable to initialize UDP connection for %v: %v", ft, err)
 	}
 
-	// to our NIC and routes packets to the downstreamIPAddr as well,
-
-	upstreamSubnet, _ := tcpip.NewSubnet(conn.ipAddr, tcpip.MaskFromBytes(conn.ipAddr.AsSlice()))
-	downstreamSubnet, _ := tcpip.NewSubnet(downstreamIPAddr, tcpip.MaskFromBytes(downstreamIPAddr.AsSlice()))
+	// to our NIC and routes packets to the downstreamIPAddr as well
+	upstreamSubnet, err := tcpip.NewSubnet(conn.ipAddr, tcpip.MaskFromBytes(conn.ipAddr.AsSlice()))
+	if err != nil {
+		return nil, fmt.Errorf("could not create subnet: %v", err)
+	}
+	downstreamSubnet, err := tcpip.NewSubnet(downstreamIPAddr, tcpip.MaskFromBytes(downstreamIPAddr.AsSlice()))
+	if err != nil {
+		return nil, fmt.Errorf("could not create subnet: %v", err)
+	}
 
 	conn.stack.SetRouteTable([]tcpip.Route{
 		{
