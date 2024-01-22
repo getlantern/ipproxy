@@ -3,7 +3,6 @@
 package ipproxy
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -15,6 +14,7 @@ import (
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
@@ -26,6 +26,7 @@ import (
 	"github.com/getlantern/dnsgrab"
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
+	"github.com/getlantern/netx"
 )
 
 var (
@@ -64,6 +65,7 @@ type Opts struct {
 	// seconds.
 	StatsInterval time.Duration
 
+	DnsGrabAddress string
 	DnsGrabServer dnsgrab.Server
 
 	// DialTCP specifies a function for dialing upstream TCP connections. Defaults
@@ -154,71 +156,106 @@ type proxy struct {
 	mu sync.Mutex
 	connsOpenBySubnetIP map[netip.Addr]int
 
+	dnsGrabUDPAddr *net.UDPAddr
+
+	writeHandle *channel.NotificationHandle
+
+	udpConns   map[fourtuple]*udpConn
+
 	closeable
 }
 
 func (p *proxy) Serve() error {
 	log.Debug("ipproxy serving traffic")
-	p.ipstack = stack.New(stack.Options{
-		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
-	})
-	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
-	err := p.ipstack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
-	if err != nil {
-		log.Errorf("could not enable TCP SACK: %v", err)
-		return fmt.Errorf("could not enable TCP SACK: %v", err)
-	}
-	p.linkEP = channel.New(512, uint32(p.opts.MTU), "")
-	if err := p.ipstack.CreateNIC(nicID, p.linkEP); err != nil {
-		log.Errorf("could not create netstack NIC: %v", err)
-		return fmt.Errorf("could not create netstack NIC: %v", err)
-	}
-	if err := p.ipstack.SetPromiscuousMode(nicID, true); err != nil {
-		log.Errorf("Unable to set promiscuous mode: %v", err)
-		return errors.New("Unable to set promiscuous mode: %v", err)
-	}
-	ipv4Subnet, tcpipErr := tcpip.NewSubnet(tcpip.AddrFromSlice(make([]byte, 4)), tcpip.MaskFromBytes(make([]byte, 4)))
-	if tcpipErr != nil {
-		log.Errorf("could not create IPv4 subnet: %v", err)
-		return fmt.Errorf("could not create IPv4 subnet: %v", err)
-	}
-	p.ipstack.SetRouteTable([]tcpip.Route{
-		{Destination: ipv4Subnet, NIC: nicID},
-	})
+
+	serveCtx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-p.closeCh
+		cancel()
+	}()
+	//p.writeHandle = p.linkEP.AddNotify(p)
+	// tcpReceiveBufferSize if set to zero, the default receive window buffer size is used instead.
 	const tcpReceiveBufferSize = 0
 	const maxInFlightConnectionAttempts = 1024
 	tcpFwd := tcp.NewForwarder(p.ipstack, tcpReceiveBufferSize, maxInFlightConnectionAttempts, p.onTCP)
-	udpFwd := udp.NewForwarder(p.ipstack, p.onUDP)
+	//udpFwd := udp.NewForwarder(p.ipstack, p.onUDP)
 	p.ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, p.wrapProtoHandler(tcpFwd.HandlePacket))
-	p.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, p.wrapProtoHandler(udpFwd.HandlePacket))
+	//p.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, p.wrapProtoHandler(udpFwd.HandlePacket))
+	go p.copyToDownstream(serveCtx)
+	go p.copyFromUpstream()
 	var wg sync.WaitGroup
 	wg.Add(1)
+	go p.copyToUpstream(&wg)
 	return p.readDownstreamPackets(&wg)
 }
 
 func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
+
 	// Default options
 	opts = opts.ApplyDefaults()
+	dnsGrabUDPAddr, err := netx.ResolveUDPAddr("udp", opts.DnsGrabAddress)
+	if err != nil {
+		return nil, log.Errorf("unable to resolve dnsGrabAddr")
+	}
+
+	ipstack := stack.New(stack.Options{
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
+	})
+	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
+	if err := ipstack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt); err != nil {
+		log.Errorf("could not enable TCP SACK: %v", err)
+		return nil, fmt.Errorf("could not enable TCP SACK: %v", err)
+	}
+	linkEP := channel.New(512, uint32(opts.MTU), "")
+	if err := ipstack.CreateNIC(nicID, linkEP); err != nil {
+		log.Errorf("could not create netstack NIC: %v", err)
+		return nil, fmt.Errorf("could not create netstack NIC: %v", err)
+	}
+	if err := ipstack.SetPromiscuousMode(nicID, true); err != nil {
+		log.Errorf("Unable to set promiscuous mode: %v", err)
+		return nil, errors.New("Unable to set promiscuous mode: %v", err)
+	}
+	ipstack.SetSpoofing(nicID, true) // Otherwise our TCP connection can not find the route backward
+	ipstack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: nicID})
+
 	p := &proxy{
 		opts:         opts,
 		proto:        ipv4.ProtocolNumber,
 		downstream:   downstream,
+		ipstack:      ipstack,
+		linkEP: 	  linkEP,
 		pktIn:        make(chan ipPacket, 1000),
+		udpConns:     make(map[fourtuple]*udpConn, 0),
+		toDownstream: make(chan stack.PacketBufferPtr),
 		connsOpenBySubnetIP: make(map[netip.Addr]int),
 		closeable: closeable{
 			closeCh:           make(chan struct{}),
 			readyToFinalizeCh: make(chan struct{}),
 			closedCh:          make(chan struct{}),
 		},
+		dnsGrabUDPAddr: dnsGrabUDPAddr,
 	}
 
 	return p, nil
 }
 
+// WriteNotify implements channel.Notification.WriteNotify.
+func (p *proxy) WriteNotify() {
+	packet := p.linkEP.Read()
+
+	log.Debug("Writing packet to downstream")
+	_, err := p.downstream.Write(packet.ToView().AsSlice())
+	packet.DecRef()
+	if err != nil {
+		log.Errorf("can not read from tun: %v", err)
+	}
+
+}
+
 var privateIPNetworks = []net.IPNet{
 	net.IPNet{
-		IP:   net.ParseIP("10.0.0.0"),
+		IP:   net.ParseIP("10.0.0.2"),
 		Mask: net.CIDRMask(8, 32),
 	},
 	net.IPNet{
@@ -239,6 +276,7 @@ func isLocalIP(ip net.IP) bool {
 	}
 	return ip.IsPrivate()
 }
+
 
 func (p *proxy) wrapProtoHandler(h func(stack.TransportEndpointID, stack.PacketBufferPtr) bool) func(stack.TransportEndpointID, stack.PacketBufferPtr) bool {
 	return func(tei stack.TransportEndpointID, pb stack.PacketBufferPtr) bool {
@@ -267,6 +305,8 @@ func (p *proxy) addSubnetAddress(ip netip.Addr) {
 		return
 	}
 
+	log.Debugf("Adding subnet address %s", ip.String())
+
 	pa := tcpip.ProtocolAddress{
 		AddressWithPrefix: tcpip.AddrFromSlice(ip.AsSlice()).WithPrefix(),
 	}
@@ -281,14 +321,92 @@ func (p *proxy) addSubnetAddress(ip netip.Addr) {
 	})
 }
 
+func toIPv4(a, b, c, d uint8) netip.Addr {
+	return netip.AddrFrom4([4]byte{a, b, c, d})
+}
+
+func (p *proxy) copyToDownstream(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			if ptr := p.linkEP.ReadContext(ctx); ptr != nil {
+				select {
+				case <-ctx.Done():
+					return
+				case p.toDownstream <- ptr.Clone():
+					continue
+				}
+			}
+		}
+	}
+}
+
+func (p *proxy) copyFromUpstream() {
+	defer p.Close()
+
+	for {
+		select {
+		case <-p.closedCh:
+			return
+		case pktInfo := <-p.toDownstream:
+			pkt := make([]byte, 0, p.opts.MTU)
+			for _, view := range pktInfo.AsSlices() {
+				pkt = append(pkt, view...)
+			}
+
+			_, err := p.downstream.Write(pkt)
+			pktInfo.DecRef()
+			if err != nil {
+				log.Errorf("Unexpected error writing to downstream: %v", err)
+				return
+			}
+		}
+	}
+}
+
+func (p *proxy) copyToUpstream(wg *sync.WaitGroup) {
+	defer wg.Done()
+	defer p.closeNow()
+	defer p.ipstack.Close()
+	defer p.closeUDP()
+
+	reapTicker := time.NewTicker(1 * time.Second)
+	defer reapTicker.Stop()
+
+	for {
+		select {
+		case pkt := <-p.pktIn:
+			switch pkt.ipProto {
+			case IPProtocolICMP:
+				fallthrough
+			case IPProtocolTCP:
+				p.acceptedPacket()
+				p.linkEP.InjectInbound(ipv4.ProtocolNumber, stack.NewPacketBuffer(stack.PacketBufferOptions{
+					Payload: buffer.MakeWithData(pkt.raw)},
+				))
+			case IPProtocolUDP:
+				p.acceptedPacket()
+				p.onUDP(pkt)
+			default:
+				p.rejectedPacket()
+				log.Debugf("Unknown IP protocol, ignoring: %v", pkt.ipProto)
+				continue
+			}
+		case <-reapTicker.C:
+			p.reapUDP()
+		case <-p.closeCh:
+			return
+		}
+	}
+}
+
 func (p *proxy) readDownstreamPackets(wg *sync.WaitGroup) (finalErr error) {
 	defer wg.Wait() // wait for copyToUpstream to finish with all of its cleanup
 	defer p.closeNow()
-
+	b := make([]byte, p.opts.MTU)
 	for {
-		// we can't reuse this byte slice across reads because each one is held in
-		// memory by the tcpip stack.
-		b := make([]byte, p.opts.MTU)
 		n, err := p.downstream.Read(b)
 		if err != nil {
 			if err == io.EOF {
@@ -297,11 +415,14 @@ func (p *proxy) readDownstreamPackets(wg *sync.WaitGroup) (finalErr error) {
 			return errors.New("Unexpected error reading from downstream: %v", err)
 		}
 		raw := b[:n]
-		packetBuf := stack.NewPacketBuffer(stack.PacketBufferOptions{
-			Payload: buffer.MakeWithData(bytes.Clone(raw)),
-		})
-		p.linkEP.InjectInbound(p.proto, packetBuf)
-		packetBuf.DecRef()
+		pkt, err := parseIPPacket(raw)
+		if err != nil {
+			log.Debugf("Error on inbound packet, ignoring: %v", err)
+			p.rejectedPacket()
+			continue
+		}
+
+		p.pktIn <- pkt
 	}
 }
 
