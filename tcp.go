@@ -63,30 +63,12 @@ func (p *proxy) onTCP(r *tcp.ForwarderRequest) {
 	if !p.forwardTCP(getConnOrReset, clientRemoteIP, &wq, dialAddr) {
 		r.Complete(true) // sends a RST
 	}
-
-	/*o := p.tcpOrigins[dstAddr]
-	if o == nil {
-		var err error
-		o, err = p.createTCPOrigin(dstAddr)
-		if err != nil {
-			log.Error(err)
-			return
-		}
-		p.tcpOrigins[dstAddr] = o
-		p.addTCPOrigin()
-	}
-
-	packetBuffer := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: buffer.MakeWithData(pkt.raw)},
-	)
-	o.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, packetBuffer)*/
 }
 
 func (p *proxy) removeSubnetAddress(ip netip.Addr) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.connsOpenBySubnetIP[ip]--
-	// Only unregister address from netstack after last concurrent connection.
 	if p.connsOpenBySubnetIP[ip] == 0 {
 		p.ipstack.RemoveAddress(nicID, tcpip.AddrFromSlice(ip.AsSlice()))
 		delete(p.connsOpenBySubnetIP, ip)
@@ -100,12 +82,10 @@ func (p *proxy)  forwardTCP(getClient func(...tcpip.SettableSocketOption) *gonet
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	waitEntry, notifyCh := waiter.NewChannelEntry(waiter.EventHUp) // TODO(bradfitz): right EventMask?
+	waitEntry, notifyCh := waiter.NewChannelEntry(waiter.EventHUp)
 	wq.EventRegister(&waitEntry)
 	defer wq.EventUnregister(&waitEntry)
 	done := make(chan bool)
-	// netstack doesn't close the notification channel automatically if there was no
-	// hup signal, so we close done after we're done to not leak the goroutine below.
 	defer close(done)
 	go func() {
 		select {
@@ -126,7 +106,6 @@ func (p *proxy)  forwardTCP(getClient func(...tcpip.SettableSocketOption) *gonet
 
 	handled = true
 
-	// We dialed the connection; we can complete the client's TCP handshake.
 	client := getClient()
 	if client == nil {
 		return
@@ -146,7 +125,7 @@ func (p *proxy)  forwardTCP(getClient func(...tcpip.SettableSocketOption) *gonet
 	if err != nil {
 		log.Errorf("proxy connection closed with error: %v", err)
 	}
-	log.Debugf("netstack: forwarder connection to %s closed", dialAddrStr)
+	log.Debugf("tcp forwarder connection to %s closed", dialAddrStr)
 	return
 }
 
