@@ -173,14 +173,13 @@ func (p *proxy) Serve() error {
 		<-p.closeCh
 		cancel()
 	}()
-	//p.writeHandle = p.linkEP.AddNotify(p)
 	// tcpReceiveBufferSize if set to zero, the default receive window buffer size is used instead.
 	const tcpReceiveBufferSize = 0
 	const maxInFlightConnectionAttempts = 1024
 	tcpFwd := tcp.NewForwarder(p.ipstack, tcpReceiveBufferSize, maxInFlightConnectionAttempts, p.onTCP)
-	//udpFwd := udp.NewForwarder(p.ipstack, p.onUDP)
+	udpFwd := udp.NewForwarder(p.ipstack, p.udpHandlePacket)
 	p.ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, p.wrapProtoHandler(tcpFwd.HandlePacket))
-	//p.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, p.wrapProtoHandler(udpFwd.HandlePacket))
+	p.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, p.wrapProtoHandler(udpFwd.HandlePacket))
 	go p.copyToDownstream(serveCtx)
 	go p.copyFromUpstream()
 	var wg sync.WaitGroup
@@ -370,10 +369,10 @@ func (p *proxy) copyToUpstream(wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer p.closeNow()
 	defer p.ipstack.Close()
-	defer p.closeUDP()
+	//defer p.closeUDP()
 
-	reapTicker := time.NewTicker(1 * time.Second)
-	defer reapTicker.Stop()
+	//reapTicker := time.NewTicker(1 * time.Second)
+	//defer reapTicker.Stop()
 
 	for {
 		select {
@@ -381,21 +380,23 @@ func (p *proxy) copyToUpstream(wg *sync.WaitGroup) {
 			switch pkt.ipProto {
 			case IPProtocolICMP:
 				fallthrough
+			case IPProtocolUDP:
+				fallthrough
 			case IPProtocolTCP:
 				p.acceptedPacket()
 				p.linkEP.InjectInbound(ipv4.ProtocolNumber, stack.NewPacketBuffer(stack.PacketBufferOptions{
 					Payload: buffer.MakeWithData(pkt.raw)},
 				))
-			case IPProtocolUDP:
+			/*case IPProtocolUDP:
 				p.acceptedPacket()
-				p.onUDP(pkt)
+				p.onUDP(pkt)*/
 			default:
 				p.rejectedPacket()
 				log.Debugf("Unknown IP protocol, ignoring: %v", pkt.ipProto)
 				continue
 			}
-		case <-reapTicker.C:
-			p.reapUDP()
+		/*case <-reapTicker.C:
+			p.reapUDP()*/
 		case <-p.closeCh:
 			return
 		}
