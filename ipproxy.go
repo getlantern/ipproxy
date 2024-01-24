@@ -58,6 +58,9 @@ type Opts struct {
 	// automatically closed. The default is 65 seconds.
 	IdleTimeout time.Duration
 
+	// When enabled, print extra debugging information when handling packets
+	DebugPackets bool
+
 	// TCPConnectBacklog is the allows backlog of TCP connections to a given
 	// upstream port. Defaults to 10.
 	TCPConnectBacklog int
@@ -246,6 +249,10 @@ func isLocalIP(ip net.IP) bool {
 	       IP: net.ParseIP(utils.GetLocalIP()),
 	  },
 	  net.IPNet{
+		IP:   net.ParseIP("240.0.0.1"),
+		Mask: net.CIDRMask(8, 32),
+	  },
+	  net.IPNet{
 	       IP:   net.ParseIP("10.0.0.2"),
 	       Mask: net.CIDRMask(8, 32),
 	  },
@@ -294,7 +301,9 @@ func (p *proxy) addSubnetAddress(ip netip.Addr) {
 		return
 	}
 
-	log.Debugf("Adding subnet address %s", ip.String())
+	if p.opts.DebugPackets {
+		log.Debugf("Adding subnet address %s", ip.String())
+	}
 
 	pa := tcpip.ProtocolAddress{
 		AddressWithPrefix: tcpip.AddrFromSlice(ip.AsSlice()).WithPrefix(),

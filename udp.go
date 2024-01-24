@@ -24,7 +24,9 @@ func ipPortOfNetstackAddr(a tcpip.Address, port uint16) (ipp netip.AddrPort, ok 
 func (p *proxy) onUDP(r *udp.ForwarderRequest) {
 	sess := r.ID()
 	go func() {
-		log.Debugf("forwarding udp: %v", stringifyTEI(sess))
+		if p.opts.DebugPackets {
+			log.Debugf("forwarding udp: %v", stringifyTEI(sess))
+		}
 		var wq waiter.Queue
 		ep, tcpErr := r.CreateEndpoint(&wq)
 		if tcpErr != nil {

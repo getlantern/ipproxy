@@ -35,7 +35,9 @@ func stringifyTEI(tei stack.TransportEndpointID) string {
 
 func (p *proxy) onTCP(r *tcp.ForwarderRequest) {
 	reqDetails := r.ID()
-	log.Debugf("TCP ForwarderRequest: %s", stringifyTEI(reqDetails))
+	if p.opts.DebugPackets {
+		log.Debugf("onTCP: %s", stringifyTEI(reqDetails))
+	}
 	clientRemoteIP := netaddrIPFromNetstackIP(reqDetails.RemoteAddress)
 
 	dialIP := netaddrIPFromNetstackIP(reqDetails.LocalAddress)
@@ -78,7 +80,9 @@ func (p *proxy) removeSubnetAddress(ip netip.Addr) {
 func (p *proxy)  forwardTCP(getClient func(...tcpip.SettableSocketOption) *gonet.TCPConn, clientRemoteIP netip.Addr, 
 	wq *waiter.Queue, dialAddr netip.AddrPort) (handled bool) {
 	dialAddrStr := dialAddr.String()
-	log.Debugf("[v2] netstack: forwarding incoming connection to %s", dialAddrStr)
+	if p.opts.DebugPackets {
+		log.Debugf("forwarding incoming connection to %s", dialAddrStr)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -97,6 +101,9 @@ func (p *proxy)  forwardTCP(getClient func(...tcpip.SettableSocketOption) *gonet
 	}()
 
 	// Attempt to dial the outbound connection before we accept the inbound one.
+	if p.opts.DebugPackets {
+		log.Debugf("Dialing outbound connection to %s", dialAddrStr)
+	}
 	server, err := p.opts.DialTCP(ctx, "tcp", dialAddrStr)
 	if err != nil {
 		log.Errorf("netstack: could not connect to local server at %s: %v", dialAddr.String(), err)
