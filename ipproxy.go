@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/netip"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -27,6 +26,8 @@ import (
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
 	"github.com/getlantern/netx"
+
+	"github.com/getlantern/ipproxy/utils"
 )
 
 var (
@@ -151,16 +152,12 @@ type proxy struct {
 
 	toDownstream chan stack.PacketBufferPtr
 
-	atomicIsLocalIPFunc atomic.Value /*func(netip.Addr) bool]*/
-
 	mu sync.Mutex
 	connsOpenBySubnetIP map[netip.Addr]int
 
 	dnsGrabUDPAddr *net.UDPAddr
 
 	writeHandle *channel.NotificationHandle
-
-	udpConns   map[fourtuple]*udpConn
 
 	closeable
 }
@@ -177,7 +174,7 @@ func (p *proxy) Serve() error {
 	const tcpReceiveBufferSize = 0
 	const maxInFlightConnectionAttempts = 1024
 	tcpFwd := tcp.NewForwarder(p.ipstack, tcpReceiveBufferSize, maxInFlightConnectionAttempts, p.onTCP)
-	udpFwd := udp.NewForwarder(p.ipstack, p.udpHandlePacket)
+	udpFwd := udp.NewForwarder(p.ipstack, p.onUDP)
 	p.ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, p.wrapProtoHandler(tcpFwd.HandlePacket))
 	p.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, p.wrapProtoHandler(udpFwd.HandlePacket))
 	go p.copyToDownstream(serveCtx)
@@ -192,11 +189,15 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 
 	// Default options
 	opts = opts.ApplyDefaults()
-	dnsGrabUDPAddr, err := netx.ResolveUDPAddr("udp", opts.DnsGrabAddress)
-	if err != nil {
-		return nil, log.Errorf("unable to resolve dnsGrabAddr")
+	var dnsGrabUDPAddr *net.UDPAddr
+	if opts.DnsGrabAddress != "" {
+		var err error
+		log.Debugf("dnsgrab enabled, rerouting DNS requests to %s", opts.DnsGrabAddress)
+		dnsGrabUDPAddr, err = netx.ResolveUDPAddr("udp", opts.DnsGrabAddress)
+		if err != nil {
+			return nil, log.Errorf("unable to resolve dnsGrabAddr: %v", err)
+		}
 	}
-
 	ipstack := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
@@ -225,7 +226,6 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		ipstack:      ipstack,
 		linkEP: 	  linkEP,
 		pktIn:        make(chan ipPacket, 1000),
-		udpConns:     make(map[fourtuple]*udpConn, 0),
 		toDownstream: make(chan stack.PacketBufferPtr),
 		connsOpenBySubnetIP: make(map[netip.Addr]int),
 		closeable: closeable{
@@ -239,39 +239,29 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 	return p, nil
 }
 
-// WriteNotify implements channel.Notification.WriteNotify.
-func (p *proxy) WriteNotify() {
-	packet := p.linkEP.Read()
-
-	log.Debug("Writing packet to downstream")
-	_, err := p.downstream.Write(packet.ToView().AsSlice())
-	packet.DecRef()
-	if err != nil {
-		log.Errorf("can not read from tun: %v", err)
-	}
-
-}
-
-var privateIPNetworks = []net.IPNet{
-	net.IPNet{
-		IP:   net.ParseIP("10.0.0.2"),
-		Mask: net.CIDRMask(8, 32),
-	},
-	net.IPNet{
-		IP:   net.ParseIP("172.16.0.0"),
-		Mask: net.CIDRMask(12, 32),
-	},
-	net.IPNet{
-		IP:   net.ParseIP("192.168.0.0"),
-		Mask: net.CIDRMask(16, 32),
-	},
-}
 
 func isLocalIP(ip net.IP) bool {
+	privateIPNetworks := []net.IPNet{
+	  net.IPNet{
+	       IP: net.ParseIP(utils.GetLocalIP()),
+	  },
+	  net.IPNet{
+	       IP:   net.ParseIP("10.0.0.2"),
+	       Mask: net.CIDRMask(8, 32),
+	  },
+	  net.IPNet{
+	       IP:   net.ParseIP("172.16.0.0"),
+	       Mask: net.CIDRMask(12, 32),
+	  },
+	  net.IPNet{
+	       IP:   net.ParseIP("192.168.0.0"),
+	       Mask: net.CIDRMask(16, 32),
+	  },
+	}
 	for _, ipNet := range privateIPNetworks {
-		if ipNet.Contains(ip) {
-			return true
-		}
+	       if ipNet.Contains(ip) {
+	               return true
+	       }
 	}
 	return ip.IsPrivate()
 }
@@ -314,14 +304,11 @@ func (p *proxy) addSubnetAddress(ip netip.Addr) {
 	} else if ip.Is6() {
 		pa.Protocol = ipv6.ProtocolNumber
 	}
+	// Add the given network address to the NIC
 	p.ipstack.AddProtocolAddress(nicID, pa, stack.AddressProperties{
 		PEB:        stack.CanBePrimaryEndpoint, // zero value default
 		ConfigType: stack.AddressConfigStatic,  // zero value default
 	})
-}
-
-func toIPv4(a, b, c, d uint8) netip.Addr {
-	return netip.AddrFrom4([4]byte{a, b, c, d})
 }
 
 func (p *proxy) copyToDownstream(ctx context.Context) {
@@ -369,10 +356,6 @@ func (p *proxy) copyToUpstream(wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer p.closeNow()
 	defer p.ipstack.Close()
-	//defer p.closeUDP()
-
-	//reapTicker := time.NewTicker(1 * time.Second)
-	//defer reapTicker.Stop()
 
 	for {
 		select {
@@ -387,16 +370,11 @@ func (p *proxy) copyToUpstream(wg *sync.WaitGroup) {
 				p.linkEP.InjectInbound(ipv4.ProtocolNumber, stack.NewPacketBuffer(stack.PacketBufferOptions{
 					Payload: buffer.MakeWithData(pkt.raw)},
 				))
-			/*case IPProtocolUDP:
-				p.acceptedPacket()
-				p.onUDP(pkt)*/
 			default:
 				p.rejectedPacket()
 				log.Debugf("Unknown IP protocol, ignoring: %v", pkt.ipProto)
 				continue
 			}
-		/*case <-reapTicker.C:
-			p.reapUDP()*/
 		case <-p.closeCh:
 			return
 		}
