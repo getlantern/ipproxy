@@ -22,7 +22,6 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 
-	"github.com/getlantern/dnsgrab"
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
 	"github.com/getlantern/netx"
@@ -69,16 +68,13 @@ type Opts struct {
 	// seconds.
 	StatsInterval time.Duration
 
-	DnsGrabAddress string
-	DnsGrabServer dnsgrab.Server
-
 	// DialTCP specifies a function for dialing upstream TCP connections. Defaults
 	// to net.Dialer.DialContext().
 	DialTCP func(ctx context.Context, network, addr string) (net.Conn, error)
 
 	// DialUDP specifies a function for dialing upstream UDP connections. Defaults
 	// to net.Dialer.DialContext().
-	DialUDP func(ctx context.Context, network, addr string) (net.Conn, error)
+	DialUDP func(ctx context.Context, laddr, raddr *net.UDPAddr) (*net.UDPConn, error)
 }
 
 // ApplyDefaults applies the default values to the given Opts, including making
@@ -107,8 +103,10 @@ func (opts *Opts) ApplyDefaults() *Opts {
 		opts.DialTCP = d.DialContext
 	}
 	if opts.DialUDP == nil {
-		d := &net.Dialer{}
-		opts.DialUDP = d.DialContext
+		opts.DialUDP = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			log.Debugf("DialUDP %s://%s", network, addr)
+			return netx.DialContext(ctx, network, addr)
+		}
 	}
 	return opts
 }
@@ -158,8 +156,6 @@ type proxy struct {
 	mu sync.Mutex
 	connsOpenBySubnetIP map[netip.Addr]int
 
-	dnsGrabUDPAddr *net.UDPAddr
-
 	writeHandle *channel.NotificationHandle
 
 	closeable
@@ -192,15 +188,6 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 
 	// Default options
 	opts = opts.ApplyDefaults()
-	var dnsGrabUDPAddr *net.UDPAddr
-	if opts.DnsGrabAddress != "" {
-		var err error
-		log.Debugf("dnsgrab enabled, rerouting DNS requests to %s", opts.DnsGrabAddress)
-		dnsGrabUDPAddr, err = netx.ResolveUDPAddr("udp", opts.DnsGrabAddress)
-		if err != nil {
-			return nil, log.Errorf("unable to resolve dnsGrabAddr: %v", err)
-		}
-	}
 	ipstack := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
@@ -236,7 +223,6 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 			readyToFinalizeCh: make(chan struct{}),
 			closedCh:          make(chan struct{}),
 		},
-		dnsGrabUDPAddr: dnsGrabUDPAddr,
 	}
 
 	return p, nil

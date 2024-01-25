@@ -2,6 +2,8 @@ package ipproxy
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"time"
@@ -34,6 +36,59 @@ func (p *proxy) onUDP(r *udp.ForwarderRequest) {
 			return
 		}
 
+		local := gonet.NewUDPConn(&wq, ep)
+		defer local.Close()
+		ctx, cancel := context.WithCancel(context.Background())
+		addr := fmt.Sprintf("%s:%d", sess.LocalAddress.String(), sess.LocalPort)
+		remote, err := p.opts.DialUDP(ctx, "udp", addr)
+		if err != nil {
+			log.Error(err)
+			return
+		}
+		errors := make(chan error, 2)
+		proxy := func(c1, c2 net.Conn) error {
+			defer c1.Close()
+			defer c2.Close()
+
+			go func() {
+				_, err := io.Copy(c1, c2)
+				errors <- err
+			}()
+
+			go func() {
+				_, err := io.Copy(c2, c1)
+				errors <- err
+			}()
+
+			err := <-errors
+			if err != nil {
+				return err
+			}
+
+			return nil
+		}
+		err = proxy(local, remote)
+		if err != nil {
+			log.Debugf("proxy connection closed with error: %v", err)
+		}
+		cancel()	
+
+	}()
+}
+
+func (p *proxy) onUDP2(r *udp.ForwarderRequest) {
+	sess := r.ID()
+	go func() {
+		if p.opts.DebugPackets {
+			log.Debugf("forwarding udp: %v", stringifyTEI(sess))
+		}
+		var wq waiter.Queue
+		ep, tcpErr := r.CreateEndpoint(&wq)
+		if tcpErr != nil {
+			log.Errorf("creating endpoint: %s", tcpErr.String())
+			return
+		}
+
 		src := gonet.NewUDPConn(&wq, ep)
 		defer src.Close()
 
@@ -49,9 +104,9 @@ func (p *proxy) onUDP(r *udp.ForwarderRequest) {
 		}
 		dstAddr := net.UDPAddrFromAddrPort(dstIP)
 		// intercept and reroute DNS traffic to dnsgrab
-		if p.dnsGrabUDPAddr != nil && dstAddr.IP.String() != "127.0.0.1" && sess.LocalPort == 53 {
-			dstAddr = p.dnsGrabUDPAddr
-		}
+		//if p.dnsGrabUDPAddr != nil && dstAddr.IP.String() != "127.0.0.1" && sess.LocalPort == 53 {
+		//	dstAddr = p.dnsGrabUDPAddr
+		//}
 
 		localAddr := &net.UDPAddr{IP: net.IP{0, 0, 0, 0}, Port: 0}
 		srcAddr := net.UDPAddrFromAddrPort(srcIP)
