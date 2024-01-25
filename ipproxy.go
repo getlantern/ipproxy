@@ -24,7 +24,6 @@ import (
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
-	"github.com/getlantern/netx"
 
 	"github.com/getlantern/ipproxy/utils"
 )
@@ -103,10 +102,8 @@ func (opts *Opts) ApplyDefaults() *Opts {
 		opts.DialTCP = d.DialContext
 	}
 	if opts.DialUDP == nil {
-		opts.DialUDP = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			log.Debugf("DialUDP %s://%s", network, addr)
-			return netx.DialContext(ctx, network, addr)
-		}
+		d := &net.Dialer{}
+		opts.DialUDP = d.DialContext
 	}
 	return opts
 }
