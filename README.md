@@ -6,6 +6,12 @@ A library which provides a proxy for IP traffic.
 
 This library uses Go modules. When running commands like `go test` in this repository, make sure the GO111MODULE environment variable is set to 'on'. See the [go command documentation](https://golang.org/cmd/go/#hdr-Preliminary_module_support) for more details. If you are running Go 1.13 or later, this should not be necessary as the Go tool will support modules by default.
 
+> In order to run ipproxy, the following tools need to be install: `lsof` and `ifconfig`.
+>
+> On Ubuntu: `apt install net-tools lsof`
+>
+> On Arch: `yay -S extra/lsof core/net-tools`
+
 ## Testing
 
 Tests in this package require root access. The easiest way to test is to compile the tests with `go test -c` and run the output binary using the `sudo` command.

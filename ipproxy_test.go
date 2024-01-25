@@ -1,9 +1,14 @@
 package ipproxy
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"github.com/stretchr/testify/require"
 	"io"
 	"net"
+	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
@@ -12,7 +17,6 @@ import (
 	"time"
 
 	"github.com/getlantern/fdcount"
-
 	"github.com/stretchr/testify/assert"
 )
 
@@ -24,6 +28,96 @@ const (
 var (
 	serverTCPConnections int64
 )
+
+func TestRoundtrip(t *testing.T) {
+
+	dev, err := TUNDevice("tun5", "10.0.1.2", "255.255.255.0", 1500)
+	require.NoError(t, err)
+	t.Cleanup(func() { dev.Close() })
+
+	outIF, err := net.InterfaceByName("eno2")
+	require.NoError(t, err)
+	outIFAddrs, err := outIF.Addrs()
+	require.NoError(t, err)
+	var laddrTCP *net.TCPAddr
+	var laddrUDP *net.UDPAddr
+	for _, outIFAddr := range outIFAddrs {
+		switch t := outIFAddr.(type) {
+		case *net.IPNet:
+			ipv4 := t.IP.To4()
+			if ipv4 != nil {
+				laddrTCP = &net.TCPAddr{IP: ipv4, Port: 0}
+				laddrUDP = &net.UDPAddr{IP: ipv4, Port: 0}
+				break
+			}
+		}
+	}
+	require.NotNil(t, laddrTCP)
+	log.Debugf("Outbound TCP will use %v", laddrTCP)
+	log.Debugf("Outbound UDP will use %v", laddrUDP)
+
+	var d net.Dialer
+	p, err := New(dev, &Opts{
+		IdleTimeout:   70 * time.Second,
+		StatsInterval: 3 * time.Second,
+		DialTCP: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := d.DialContext(ctx, network, "localhost:9876")
+			log.Debugf("Dialed %v", conn.RemoteAddr())
+			return conn, err
+		},
+		DialUDP: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return nil, errors.New("not implemented")
+		},
+	})
+	require.NoError(t, err)
+	// Listen for incoming connections on port 8080
+	ln, err := net.Listen("tcp", ":9876")
+	t.Cleanup(func() { ln.Close() })
+	require.NoError(t, err)
+	result := bytes.Buffer{}
+	go func() {
+		t.Log("Accepting connections")
+		conn, err := ln.Accept()
+		require.NoError(t, err)
+		t.Log("Connection accepted")
+		// read in loop
+		for {
+			buf := make([]byte, 1024)
+			n, err := conn.Read(buf)
+			if errors.Is(err, io.EOF) {
+				t.Log("EOF")
+				conn.Close()
+				break
+			}
+			t.Log(fmt.Sprintf("read %d bytes: %v", n, string(buf[:n])))
+			require.NoError(t, err)
+			result.Write(buf[:n])
+		}
+	}()
+	go p.Serve()
+
+	// execute: `sudo route add -host 185.85.17.95 dev tun5`
+	// Add a route to the host 185.85.17.95 using the tun5 device
+	cmd := exec.Command("sudo", "route", "add", "-host", "185.85.17.95", "dev", "tun5")
+	err = cmd.Run()
+	require.NoError(t, err)
+
+	go func() {
+		// connect to 185.85.17.95 on any port and write hello\nhello!
+		conn, err := net.Dial("tcp", "185.85.17.95:9876")
+		require.NoError(t, err)
+		_, err = conn.Write([]byte("hello my baby, hello my darling\n"))
+		require.NoError(t, err)
+		time.Sleep(1 * time.Second)
+		_, err = conn.Write([]byte("bye!"))
+		require.NoError(t, err)
+		conn.Close()
+	}()
+
+	time.Sleep(2 * time.Second)
+	p.Close()
+	require.Equal(t, "hello my baby, hello my darling\nbye!", result.String())
+}
 
 // Note - this test has to be run with root permissions to allow setting up the
 // TUN device.

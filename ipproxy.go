@@ -9,13 +9,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/netstack/tcpip"
-	"github.com/google/netstack/tcpip/buffer"
-	"github.com/google/netstack/tcpip/link/channel"
-	"github.com/google/netstack/tcpip/network/ipv4"
-	"github.com/google/netstack/tcpip/stack"
-	"github.com/google/netstack/tcpip/transport/tcp"
-	"github.com/google/netstack/tcpip/transport/udp"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
+
+	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
@@ -102,19 +104,19 @@ type Proxy interface {
 	// Serve starts proxying and blocks until finished
 	Serve() error
 
-	// Count of accepted packets
+	// AcceptedPackets is the count of accepted packets
 	AcceptedPackets() int
 
-	// Count of rejected packets
+	// RejectedPackets is the count of rejected packets
 	RejectedPackets() int
 
-	// Number of TCP origins being tracked
+	// NumTCPOrigins is the number of TCP origins being tracked
 	NumTCPOrigins() int
 
-	// Number of TCP connections being tracked
+	// NumTCPConns is the number of TCP connections being tracked
 	NumTCPConns() int
 
-	// Number of UDP "connections" being tracked
+	// NumUDPConns is the number of UDP "connections" being tracked
 	NumUDPConns() int
 
 	// Close shuts down the proxy in an orderly fashion and blocks until shutdown
@@ -137,7 +139,7 @@ type proxy struct {
 	tcpOrigins map[addr]*tcpOrigin
 	udpConns   map[fourtuple]*udpConn
 
-	toDownstream chan channel.PacketInfo
+	toDownstream chan stack.PacketBufferPtr
 
 	closeable
 }
@@ -148,7 +150,14 @@ func (p *proxy) Serve() error {
 		return err
 	}
 
+	serveCtx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-p.closeCh
+		cancel()
+	}()
+
 	go p.trackStats()
+	go p.copyToDownstream(serveCtx, icmpEndpoint)
 	go p.copyFromUpstream()
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -159,7 +168,6 @@ func (p *proxy) Serve() error {
 func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 	// Default options
 	opts = opts.ApplyDefaults()
-
 	p := &proxy{
 		opts:         opts,
 		proto:        ipv4.ProtocolNumber,
@@ -167,16 +175,12 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		pktIn:        make(chan ipPacket, 1000),
 		tcpOrigins:   make(map[addr]*tcpOrigin, 0),
 		udpConns:     make(map[fourtuple]*udpConn, 0),
-		toDownstream: make(chan channel.PacketInfo),
+		toDownstream: make(chan stack.PacketBufferPtr),
 		closeable: closeable{
 			closeCh:           make(chan struct{}),
 			readyToFinalizeCh: make(chan struct{}),
 			closedCh:          make(chan struct{}),
 		},
-	}
-
-	p.finalizer = func() error {
-		return nil
 	}
 
 	return p, nil
@@ -231,7 +235,7 @@ func (p *proxy) copyToUpstream(icmpStack *stack.Stack, icmpEndpoint *channel.End
 				p.onUDP(pkt)
 			case IPProtocolICMP:
 				p.acceptedPacket()
-				icmpEndpoint.InjectInbound(p.proto, tcpip.PacketBuffer{Data: buffer.View(pkt.raw).ToVectorisedView()})
+				icmpEndpoint.InjectInbound(p.proto, stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(pkt.raw)}))
 			default:
 				p.rejectedPacket()
 				log.Debugf("Unknown IP protocol, ignoring: %v", pkt.ipProto)
@@ -255,9 +259,12 @@ func (p *proxy) copyFromUpstream() {
 			return
 		case pktInfo := <-p.toDownstream:
 			pkt := make([]byte, 0, p.opts.MTU)
-			pkt = append(pkt, pktInfo.Pkt.Header.View()...)
-			pkt = append(pkt, pktInfo.Pkt.Data.ToView()...)
+			for _, view := range pktInfo.AsSlices() {
+				pkt = append(pkt, view...)
+			}
+
 			_, err := p.downstream.Write(pkt)
+			pktInfo.DecRef()
 			if err != nil {
 				log.Errorf("Unexpected error writing to downstream: %v", err)
 				return
@@ -266,33 +273,39 @@ func (p *proxy) copyFromUpstream() {
 	}
 }
 
+func (p *proxy) copyToDownstream(ctx context.Context, channelEndpoint *channel.Endpoint) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			if ptr := channelEndpoint.ReadContext(ctx); ptr != nil {
+				select {
+				case <-ctx.Done():
+					return
+				case p.toDownstream <- ptr.Clone():
+					continue
+				}
+			}
+		}
+	}
+}
+
 func (p *proxy) stackForICMP() (*stack.Stack, *channel.Endpoint, error) {
 	channelEndpoint := channel.New(p.opts.OutboundBufferDepth, uint32(p.opts.MTU), "")
 	s := stack.New(stack.Options{
-		NetworkProtocols:   []stack.NetworkProtocol{ipv4.NewProtocol()},
-		TransportProtocols: []stack.TransportProtocol{tcp.NewProtocol(), udp.NewProtocol()},
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
 	})
 	if err := s.CreateNIC(nicID, channelEndpoint); err != nil {
 		s.Close()
 		return nil, nil, errors.New("Unable to create ICMP NIC: %v", err)
 	}
+	s.SetRouteTable([]tcpip.Route{
+		{Destination: header.IPv4EmptySubnet, NIC: nicID},
+	})
 	if err := s.SetPromiscuousMode(nicID, true); err != nil {
-		s.Close()
-		return nil, nil, errors.New("Unable to set ICMP NIC to promiscious mode: %v", err)
+		return nil, nil, errors.New("Unable to set promiscuous mode: %v", err)
 	}
-	go func() {
-		for {
-			select {
-			case <-p.closedCh:
-				return
-			case pktInfo := <-channelEndpoint.C:
-				select {
-				case <-p.closedCh:
-					return
-				case p.toDownstream <- pktInfo:
-				}
-			}
-		}
-	}()
 	return s, channelEndpoint, nil
 }
