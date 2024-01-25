@@ -42,34 +42,26 @@ func (p *proxy) onUDP(r *udp.ForwarderRequest) {
 			log.Error(err)
 			return
 		}
+		defer remote.Close()
 		errors := make(chan error, 2)
-		proxy := func(c1, c2 net.Conn) error {
-			defer c1.Close()
-			defer c2.Close()
-
-			go func() {
-				_, err := io.Copy(c1, c2)
-				errors <- err
-			}()
-
-			go func() {
-				_, err := io.Copy(c2, c1)
-				errors <- err
-			}()
-
-			err := <-errors
-			if err != nil {
-				return err
+		copyConn := func(c1, c2 net.Conn) {
+			_, err := io.Copy(c1, c2)
+			errors <- err
+		}
+		go copyConn(local, remote)
+		go copyConn(remote, local)
+		select {
+		case err = <-errors:
+			if p.opts.DebugPackets && err != nil {
+				log.Error(err)
 			}
-
-			return nil
+		case <-ctx.Done():
+			if p.opts.DebugPackets {
+				log.Debug("shutting down connection relay")
+			}
+			return
 		}
-		err = proxy(local, remote)
-		if err != nil {
-			log.Debugf("proxy connection closed with error: %v", err)
-		}
-		cancel()	
-
+		cancel()
 	}()
 }
 
