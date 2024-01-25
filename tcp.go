@@ -132,7 +132,9 @@ func (p *proxy)  forwardTCP(getClient func(...tcpip.SettableSocketOption) *gonet
 	if err != nil {
 		log.Errorf("proxy connection closed with error: %v", err)
 	}
-	log.Debugf("tcp forwarder connection to %s closed", dialAddrStr)
+	if p.opts.DebugPackets {
+		log.Debugf("tcp forwarder connection to %s closed", dialAddrStr)
+	}
 	return
 }
 

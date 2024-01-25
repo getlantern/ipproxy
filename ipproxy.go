@@ -74,7 +74,7 @@ type Opts struct {
 
 	// DialUDP specifies a function for dialing upstream UDP connections. Defaults
 	// to net.Dialer.DialContext().
-	DialUDP func(ctx context.Context, laddr, raddr *net.UDPAddr) (*net.UDPConn, error)
+	DialUDP func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // ApplyDefaults applies the default values to the given Opts, including making
