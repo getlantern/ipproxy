@@ -11,7 +11,7 @@ import (
 
 // TUNDevice creates a TUN device with the given name and configures an interface for that TUN
 // device at the given address and netmask and given mtu (should usually be 1500).
-func TUNDevice(name, addr, netmask string, mtu int) (io.ReadWriteCloser, error) {
+func TUNDevice(name, addr, gw, netmask string, mtu int) (io.ReadWriteCloser, error) {
 	cfg := water.Config{DeviceType: water.TUN}
 	cfg.Name = name
 	dev, err := water.New(cfg)

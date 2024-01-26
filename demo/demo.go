@@ -84,7 +84,7 @@ func main() {
 		}()
 	}
 
-	dev, err := ipproxy.TUNDevice(*tunDevice, *tunAddr, *tunMask, 1500)
+	dev, err := ipproxy.TUNDevice(*tunDevice, *tunAddr, *tunGW, *tunMask, 1500)
 	if err != nil {
 		log.Fatalf("error opening TUN device: %v", err)
 	}
@@ -128,6 +128,10 @@ func main() {
 				addr = *tcpDest + ":" + port
 			}
 			conn, err := d.DialContext(ctx, network, addr)
+			if err != nil {
+				log.Error(err)
+				return nil, err
+			}
 			log.Debugf("Dialed %v", conn.RemoteAddr())
 			return conn, err
 		},
@@ -137,6 +141,7 @@ func main() {
 				_, port, _ := net.SplitHostPort(addr)
 				addr = *udpDest + ":" + port
 			}
+			log.Debugf("Dialing %s://%s", network, addr)
 			return net.Dial(network, addr)
 		},
 	})

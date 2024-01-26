@@ -3,106 +3,65 @@ package ipproxy
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
+	"net/netip"
 
-	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
-	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
-
-	"github.com/getlantern/errors"
-	"github.com/getlantern/eventual"
+	"gvisor.dev/gvisor/pkg/waiter"
 )
 
-func (p *proxy) onUDP(pkt ipPacket) {
-	ft := pkt.ft()
-	conn := p.udpConns[ft]
-	if conn == nil {
-		var err error
-		conn, err = p.startUDPConn(ft)
+func ipPortOfNetstackAddr(a tcpip.Address, port uint16) (ipp netip.AddrPort, ok bool) {
+	if addr, ok := netip.AddrFromSlice(a.AsSlice()); ok {
+		return netip.AddrPortFrom(addr, port), true
+	}
+	return netip.AddrPort{}, false
+}
+
+func (p *proxy) onUDP(r *udp.ForwarderRequest) {
+	sess := r.ID()
+	go func() {
+		if p.opts.DebugPackets {
+			log.Debugf("forwarding udp: %v", stringifyTEI(sess))
+		}
+		var wq waiter.Queue
+		ep, tcpErr := r.CreateEndpoint(&wq)
+		if tcpErr != nil {
+			log.Errorf("creating endpoint: %s", tcpErr.String())
+			return
+		}
+
+		local := gonet.NewUDPConn(&wq, ep)
+		defer local.Close()
+		ctx, cancel := context.WithCancel(context.Background())
+		addr := fmt.Sprintf("%s:%d", sess.LocalAddress.String(), sess.LocalPort)
+		remote, err := p.opts.DialUDP(ctx, "udp", addr)
 		if err != nil {
 			log.Error(err)
 			return
 		}
-		p.udpConns[ft] = conn
-		p.addUDPConn()
-	}
-	inboundPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: buffer.MakeWithData(pkt.raw),
-	})
-	defer inboundPkt.DecRef()
-	conn.channelEndpoint.InjectInbound(ipv4.ProtocolNumber, inboundPkt)
-}
-
-func (p *proxy) startUDPConn(ft fourtuple) (*udpConn, error) {
-	upstreamValue := eventual.NewValue()
-
-	downstreamIPAddr := tcpip.AddrFrom4([4]byte(net.ParseIP(ft.src.ip).To4()))
-
-	conn := &udpConn{
-		origin: *newOrigin(p, udp.NewProtocol, ft.dst, upstreamValue, func(o *origin) error {
-			return nil
-		}),
-		ft: ft,
-	}
-
-	go func() {
-		upstreamAddr := fmt.Sprintf("%v:%d", ft.dst.ip, ft.dst.port)
-		upstream, err := p.opts.DialUDP(context.Background(), "udp", upstreamAddr)
-		if err != nil {
-			upstreamValue.Cancel()
-			conn.closeNow()
-			log.Errorf("Unable to dial upstream %v: %v", upstreamAddr, err)
+		defer remote.Close()
+		errors := make(chan error, 2)
+		copyConn := func(c1, c2 net.Conn) {
+			_, err := io.Copy(c1, c2)
+			errors <- err
 		}
-		upstreamValue.Set(upstream)
+		go copyConn(local, remote)
+		go copyConn(remote, local)
+		select {
+		case err = <-errors:
+			if p.opts.DebugPackets && err != nil {
+				log.Error(err)
+			}
+		case <-ctx.Done():
+			if p.opts.DebugPackets {
+				log.Debug("shutting down connection relay")
+			}
+			return
+		}
+		cancel()
 	}()
-
-	if err := conn.init(udp.ProtocolNumber, tcpip.FullAddress{NIC: nicID, Port: ft.dst.port}); err != nil {
-		conn.closeNow()
-		return nil, errors.New("Unable to initialize UDP connection for %v: %v", ft, err)
-	}
-
-	// to our NIC and routes packets to the downstreamIPAddr as well,
-
-	upstreamSubnet, _ := tcpip.NewSubnet(conn.ipAddr, tcpip.MaskFromBytes(conn.ipAddr.AsSlice()))
-	downstreamSubnet, _ := tcpip.NewSubnet(downstreamIPAddr, tcpip.MaskFromBytes(downstreamIPAddr.AsSlice()))
-
-	conn.stack.SetRouteTable([]tcpip.Route{
-		{
-			Destination: upstreamSubnet,
-			NIC:         nicID,
-		},
-		{
-			Destination: downstreamSubnet,
-			NIC:         nicID,
-		},
-	})
-
-	go conn.copyToUpstream()
-	go conn.copyFromUpstream(tcpip.WriteOptions{To: &tcpip.FullAddress{NIC: nicID, Addr: downstreamIPAddr, Port: ft.src.port}})
-	return conn, nil
 }
 
-type udpConn struct {
-	origin
-	ft fourtuple
-}
-
-func (p *proxy) reapUDP() {
-	for ft, conn := range p.udpConns {
-		if conn.timeSinceLastActive() > p.opts.IdleTimeout {
-			go conn.closeNow()
-			delete(p.udpConns, ft)
-			p.removeUDPConn()
-		}
-	}
-}
-
-func (p *proxy) closeUDP() {
-	for ft, conn := range p.udpConns {
-		conn.closeNow()
-		delete(p.udpConns, ft)
-		p.removeUDPConn()
-	}
-}
