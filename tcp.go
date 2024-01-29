@@ -94,7 +94,9 @@ func (p *proxy)  forwardTCP(getClient func(...tcpip.SettableSocketOption) *gonet
 	go func() {
 		select {
 		case <-notifyCh:
-			log.Debugf("netstack: forwardTCP notifyCh fired; canceling context for %s", dialAddrStr)
+			if p.opts.DebugPackets {
+				log.Debugf("netstack: forwardTCP notifyCh fired; canceling context for %s", dialAddrStr)
+			}
 		case <-done:
 		}
 		cancel()
@@ -129,7 +131,7 @@ func (p *proxy)  forwardTCP(getClient func(...tcpip.SettableSocketOption) *gonet
 		connClosed <- err
 	}()
 	err = <-connClosed
-	if err != nil {
+	if err != nil && p.opts.DebugPackets {
 		log.Errorf("proxy connection closed with error: %v", err)
 	}
 	if p.opts.DebugPackets {
