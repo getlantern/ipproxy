@@ -213,9 +213,19 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		return nil, errors.New("Unable to set promiscuous mode: %v", err)
 	}
 	// Enable spoofing on the interface to allow replying from addresses other than those set on the interface
-	// Otherwise our TCP connection can not find the route backward
 	if err := ipstack.SetSpoofing(nicID, true); err != nil {
 		return nil, fmt.Errorf("failed to enable spoofing on NIC: %v", err)
+	}
+
+	for _, ip := range opts.LocalAddresses {
+		if err := addSubnetAddress(ipstack, ip); err != nil {
+			return nil, err
+		}
+	}
+
+	ipstack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: nicID})
+	if !opts.DisableIPv6 {
+		ipstack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: nicID})
 	}
 
 	p := &proxy{
@@ -233,25 +243,10 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		},
 	}
 
-	for _, ip := range opts.LocalAddresses {
-		if err := p.addSubnetAddress(ip); err != nil {
-			return nil, err
-		}
-	}
-
-	ipstack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: nicID})
-	if !opts.DisableIPv6 {
-		ipstack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: nicID})
-	}
-
 	return p, nil
 }
 
-func (p *proxy) addSubnetAddress(ip netip.Addr) error {
-	if p.opts.DebugPackets {
-		log.Debugf("Adding subnet address %s", ip.String())
-	}
-
+func addSubnetAddress(ipstack *stack.Stack, ip netip.Addr) error {
 	pa := tcpip.ProtocolAddress{
 		AddressWithPrefix: tcpip.AddrFromSlice(ip.AsSlice()).WithPrefix(),
 	}
@@ -261,7 +256,7 @@ func (p *proxy) addSubnetAddress(ip netip.Addr) error {
 		pa.Protocol = ipv6.ProtocolNumber
 	}
 	// Add the given network address to the NIC
-	if err := p.ipstack.AddProtocolAddress(nicID, pa, stack.AddressProperties{
+	if err := ipstack.AddProtocolAddress(nicID, pa, stack.AddressProperties{
 		PEB:        stack.CanBePrimaryEndpoint, // zero value default
 		ConfigType: stack.AddressConfigStatic,  // zero value default
 	}); err != nil {
