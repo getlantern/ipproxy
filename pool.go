@@ -4,12 +4,12 @@ import (
     "sync"
 )
 
-const bufferSize = 1 << 17
+const maxUDPPacketSize = 1 << 17
 
 // Buffer pool for forwarding UDP packets
 var udpBufPool = sync.Pool {
-    New: func() interface {} {
-        return make([]byte, bufferSize)
+    New: func() any {
+        return make([]byte, maxUDPPacketSize)
     },
 }
 
