@@ -68,7 +68,7 @@ type Opts struct {
 	// upstream port. Defaults to 10.
 	TCPConnectBacklog int
 
-	// FDs are the file descriptors to use when reading/writing packets
+	// FDs represent the file descriptors (e.g. TUN devices) to use when reading/writing packets
 	FDs []int
 
 	// StatsInterval controls how frequently to display stats. Defaults to 15
@@ -203,7 +203,8 @@ func New(opts *Opts) (Proxy, error) {
 	var linkEndpoint stack.LinkEndpoint
 	if len(opts.FDs) > 0 {
 		var err error
-		// if FDs are specified with Opts, create a new fd-based endpoint
+		// create a new FD based endpoint. FD based endpoints can use more than one file descriptor
+		// to read incoming packets
 		linkEndpoint, err = fdbased.New(&fdbased.Options{
 			FDs:                opts.FDs,
 			MTU:                uint32(opts.MTU),
