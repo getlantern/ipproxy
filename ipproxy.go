@@ -24,8 +24,6 @@ import (
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
-
-	"github.com/getlantern/ipproxy/utils"
 )
 
 var (
@@ -58,6 +56,12 @@ type Opts struct {
 
 	// When enabled, print extra debugging information when handling packets
 	DebugPackets bool
+
+	// Only forward IPv4 traffic
+	DisableIPv6 bool
+
+	// Local network addresses to add to the NIC
+	LocalAddresses []netip.Addr
 
 	// TCPConnectBacklog is the allows backlog of TCP connections to a given
 	// upstream port. Defaults to 10.
@@ -151,7 +155,6 @@ type proxy struct {
 	toDownstream chan stack.PacketBufferPtr
 
 	mu sync.Mutex
-	connsOpenBySubnetIP map[netip.Addr]int
 
 	writeHandle *channel.NotificationHandle
 
@@ -166,13 +169,15 @@ func (p *proxy) Serve() error {
 		<-p.closeCh
 		cancel()
 	}()
+
 	// tcpReceiveBufferSize if set to zero, the default receive window buffer size is used instead.
 	const tcpReceiveBufferSize = 0
 	const maxInFlightConnectionAttempts = 1024
 	tcpFwd := tcp.NewForwarder(p.ipstack, tcpReceiveBufferSize, maxInFlightConnectionAttempts, p.onTCP)
 	udpFwd := udp.NewForwarder(p.ipstack, p.onUDP)
-	p.ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, p.wrapProtoHandler(tcpFwd.HandlePacket))
-	p.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, p.wrapProtoHandler(udpFwd.HandlePacket))
+
+	p.ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
+	p.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
 	go p.copyToDownstream(serveCtx)
 	go p.copyFromUpstream()
 	var wg sync.WaitGroup
@@ -185,8 +190,12 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 
 	// Default options
 	opts = opts.ApplyDefaults()
+	networkProtocols := []stack.NetworkProtocolFactory{ipv4.NewProtocol}
+	if !opts.DisableIPv6 {
+		networkProtocols = append(networkProtocols, ipv6.NewProtocol)
+	}
 	ipstack := stack.New(stack.Options{
-		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
+		NetworkProtocols:   networkProtocols,
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
 	})
 	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
@@ -203,8 +212,11 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		log.Errorf("Unable to set promiscuous mode: %v", err)
 		return nil, errors.New("Unable to set promiscuous mode: %v", err)
 	}
-	ipstack.SetSpoofing(nicID, true) // Otherwise our TCP connection can not find the route backward
-	ipstack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: nicID})
+	// Enable spoofing on the interface to allow replying from addresses other than those set on the interface
+	// Otherwise our TCP connection can not find the route backward
+	if err := ipstack.SetSpoofing(nicID, true); err != nil {
+		return nil, fmt.Errorf("failed to enable spoofing on NIC: %v", err)
+	}
 
 	p := &proxy{
 		opts:         opts,
@@ -214,7 +226,6 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		linkEP: 	  linkEP,
 		pktIn:        make(chan ipPacket, 1000),
 		toDownstream: make(chan stack.PacketBufferPtr),
-		connsOpenBySubnetIP: make(map[netip.Addr]int),
 		closeable: closeable{
 			closeCh:           make(chan struct{}),
 			readyToFinalizeCh: make(chan struct{}),
@@ -222,68 +233,21 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		},
 	}
 
+	for _, ip := range opts.LocalAddresses {
+		if err := p.addSubnetAddress(ip); err != nil {
+			return nil, err
+		}
+	}
+
+	ipstack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: nicID})
+	if !opts.DisableIPv6 {
+		ipstack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: nicID})
+	}
+
 	return p, nil
 }
 
-
-func isLocalIP(ip net.IP) bool {
-	privateIPNetworks := []net.IPNet{
-	  net.IPNet{
-	       IP: net.ParseIP(utils.GetLocalIP()),
-	  },
-	  net.IPNet{
-		IP:   net.ParseIP("240.0.0.1"),
-		Mask: net.CIDRMask(8, 32),
-	  },
-	  net.IPNet{
-	       IP:   net.ParseIP("10.0.0.2"),
-	       Mask: net.CIDRMask(8, 32),
-	  },
-	  net.IPNet{
-	       IP:   net.ParseIP("172.16.0.0"),
-	       Mask: net.CIDRMask(12, 32),
-	  },
-	  net.IPNet{
-	       IP:   net.ParseIP("192.168.0.0"),
-	       Mask: net.CIDRMask(16, 32),
-	  },
-	}
-	for _, ipNet := range privateIPNetworks {
-	       if ipNet.Contains(ip) {
-	               return true
-	       }
-	}
-	return ip.IsPrivate()
-}
-
-
-func (p *proxy) wrapProtoHandler(h func(stack.TransportEndpointID, stack.PacketBufferPtr) bool) func(stack.TransportEndpointID, stack.PacketBufferPtr) bool {
-	return func(tei stack.TransportEndpointID, pb stack.PacketBufferPtr) bool {
-		addr := tei.LocalAddress
-		ip, ok := netip.AddrFromSlice(addr.AsSlice())
-		if !ok {
-			log.Debug("netstack: could not parse local address for incoming connection")
-			return false
-		}
-		ip = ip.Unmap()
-		if !isLocalIP(net.IP(addr.AsSlice())) {
-			p.addSubnetAddress(ip)
-		}
-		return h(tei, pb)
-	}
-}
-
-func (p *proxy) addSubnetAddress(ip netip.Addr) {
-
-	p.mu.Lock()
-	p.connsOpenBySubnetIP[ip]++
-	needAdd := p.connsOpenBySubnetIP[ip] == 1
-	p.mu.Unlock()
-
-	if !needAdd {
-		return
-	}
-
+func (p *proxy) addSubnetAddress(ip netip.Addr) error {
 	if p.opts.DebugPackets {
 		log.Debugf("Adding subnet address %s", ip.String())
 	}
@@ -297,10 +261,13 @@ func (p *proxy) addSubnetAddress(ip netip.Addr) {
 		pa.Protocol = ipv6.ProtocolNumber
 	}
 	// Add the given network address to the NIC
-	p.ipstack.AddProtocolAddress(nicID, pa, stack.AddressProperties{
+	if err := p.ipstack.AddProtocolAddress(nicID, pa, stack.AddressProperties{
 		PEB:        stack.CanBePrimaryEndpoint, // zero value default
 		ConfigType: stack.AddressConfigStatic,  // zero value default
-	})
+	}); err != nil {
+		return fmt.Errorf("failed to add IPv4 address: %v", err)
+	}
+	return nil
 }
 
 func (p *proxy) copyToDownstream(ctx context.Context) {

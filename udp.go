@@ -3,14 +3,17 @@ package ipproxy
 import (
 	"context"
 	"fmt"
-	"io"
-	"net"
 	"net/netip"
+	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/waiter"
+)
+
+const (
+	udpWaitTimeout = 5 * time.Second
 )
 
 func ipPortOfNetstackAddr(a tcpip.Address, port uint16) (ipp netip.AddrPort, ok bool) {
@@ -43,24 +46,7 @@ func (p *proxy) onUDP(r *udp.ForwarderRequest) {
 			return
 		}
 		defer remote.Close()
-		errors := make(chan error, 2)
-		copyConn := func(c1, c2 net.Conn) {
-			_, err := io.Copy(c1, c2)
-			errors <- err
-		}
-		go copyConn(local, remote)
-		go copyConn(remote, local)
-		select {
-		case err = <-errors:
-			if p.opts.DebugPackets && err != nil {
-				log.Error(err)
-			}
-		case <-ctx.Done():
-			if p.opts.DebugPackets {
-				log.Debug("shutting down connection relay")
-			}
-			return
-		}
+		relay(local, remote, udpWaitTimeout)
 		cancel()
 	}()
 }
