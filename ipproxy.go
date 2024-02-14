@@ -13,7 +13,6 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
-	"gvisor.dev/gvisor/pkg/tcpip/link/fdbased"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
+	"github.com/xjasonlyu/tun2socks/v2/core/device"
 )
 
 var (
@@ -58,6 +58,13 @@ type Opts struct {
 	// When enabled, print extra debugging information when handling packets
 	DebugPackets bool
 
+	// if specified, the network interface ipproxy is configured to use and
+	// the networking stack will use as stack.LinkEndpoint
+	Device device.Device
+
+	// DeviceName is the name of the network interface ipproxy should be configured to use
+	DeviceName string
+
 	// Only forward IPv4 traffic
 	DisableIPv6 bool
 
@@ -67,9 +74,6 @@ type Opts struct {
 	// TCPConnectBacklog is the allows backlog of TCP connections to a given
 	// upstream port. Defaults to 10.
 	TCPConnectBacklog int
-
-	// FDs represent the file descriptors (e.g. TUN devices) to use when reading/writing packets
-	FDs []int
 
 	// StatsInterval controls how frequently to display stats. Defaults to 15
 	// seconds.
@@ -201,19 +205,14 @@ func New(opts *Opts) (Proxy, error) {
 		return nil, fmt.Errorf("could not enable TCP SACK: %v", err)
 	}
 	var linkEndpoint stack.LinkEndpoint
-	if len(opts.FDs) > 0 {
-		var err error
-		// create a new FD based endpoint. FD based endpoints can use more than one file descriptor
-		// to read incoming packets
-		linkEndpoint, err = fdbased.New(&fdbased.Options{
-			FDs:                opts.FDs,
-			MTU:                uint32(opts.MTU),
-			// TUN only, ignore ethernet header.
-			EthernetHeader: false,
-		})
+	if opts.Device != nil {
+		linkEndpoint = opts.Device
+	} else if opts.DeviceName != "" {
+		device, err := parseDevice(opts.DeviceName, uint32(opts.MTU))
 		if err != nil {
 			return nil, err
 		}
+		linkEndpoint = device
 	} else {
 		linkEndpoint = channel.New(512, uint32(opts.MTU), "")
 	}
