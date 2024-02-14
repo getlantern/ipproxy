@@ -58,11 +58,10 @@ type Opts struct {
 	// When enabled, print extra debugging information when handling packets
 	DebugPackets bool
 
-	// if specified, the network interface ipproxy is configured to use and
-	// the networking stack will use as stack.LinkEndpoint
+	// the network layer device ipproxy should be configured to use
 	Device device.Device
 
-	// DeviceName is the name of the network interface ipproxy should be configured to use
+	// the name of the network layer device ipproxy should be configured to use
 	DeviceName string
 
 	// Only forward IPv4 traffic
