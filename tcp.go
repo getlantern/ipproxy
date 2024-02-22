@@ -43,8 +43,6 @@ func (p *proxy) onTCP(r *tcp.ForwarderRequest) {
 	dialIP := netaddrIPFromNetstackIP(reqDetails.LocalAddress)
 	var wq waiter.Queue
 
-	defer p.removeSubnetAddress(dialIP)
-
 	getConnOrReset := func(opts ...tcpip.SettableSocketOption) *gonet.TCPConn {
 		ep, err := r.CreateEndpoint(&wq)
 		if err != nil {
@@ -64,16 +62,6 @@ func (p *proxy) onTCP(r *tcp.ForwarderRequest) {
 
 	if !p.forwardTCP(getConnOrReset, clientRemoteIP, &wq, dialAddr) {
 		r.Complete(true) // sends a RST
-	}
-}
-
-func (p *proxy) removeSubnetAddress(ip netip.Addr) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.connsOpenBySubnetIP[ip]--
-	if p.connsOpenBySubnetIP[ip] == 0 {
-		p.ipstack.RemoveAddress(nicID, tcpip.AddrFromSlice(ip.AsSlice()))
-		delete(p.connsOpenBySubnetIP, ip)
 	}
 }
 
