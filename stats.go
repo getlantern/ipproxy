@@ -1,17 +1,18 @@
 package ipproxy
 
 import (
+	"context"
 	"sync/atomic"
 	"time"
 )
 
-func (p *proxy) trackStats() {
+func (p *proxy) trackStats(ctx context.Context) {
 	ticker := time.NewTicker(p.opts.StatsInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-p.closeCh:
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			log.Debugf("TCP Origins: %v   TCP Clients: %v    UDP Conns: %v", p.NumTCPOrigins(), p.NumTCPConns(), p.NumUDPConns())

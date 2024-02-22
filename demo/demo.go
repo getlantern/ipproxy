@@ -118,7 +118,8 @@ func main() {
 	log.Debugf("Outbound UDP will use %v", laddrUDP)
 
 	var d net.Dialer
-	p, err := ipproxy.New(dev, &ipproxy.Opts{
+	p, err := ipproxy.New(&ipproxy.Opts{
+		Device:   dev,
 		IdleTimeout:   70 * time.Second,
 		StatsInterval: 3 * time.Second,
 		DialTCP: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -149,6 +150,7 @@ func main() {
 		log.Fatal(err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch,
 		syscall.SIGHUP,
@@ -161,9 +163,10 @@ func main() {
 		dev.Close()
 		log.Debug("Closed TUN device")
 		p.Close()
+		cancel()
 		log.Debug("Closed ipproxy")
 	}()
 
 	defer p.Close()
-	log.Debugf("Final result: %v", p.Serve())
+	log.Debugf("Final result: %v", p.Serve(ctx))
 }

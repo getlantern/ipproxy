@@ -5,13 +5,11 @@ package ipproxy
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
 	"sync"
 	"time"
 
-	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
@@ -24,6 +22,7 @@ import (
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
+	"github.com/xjasonlyu/tun2socks/v2/core/device"
 )
 
 var (
@@ -40,6 +39,8 @@ const (
 	IPProtocolICMP = 1
 	IPProtocolTCP  = 6
 	IPProtocolUDP  = 17
+
+	nicID          = 1
 )
 
 type Opts struct {
@@ -56,6 +57,12 @@ type Opts struct {
 
 	// When enabled, print extra debugging information when handling packets
 	DebugPackets bool
+
+	// the network layer device ipproxy should be configured to use
+	Device device.Device
+
+	// the name of the network layer device ipproxy should be configured to use
+	DeviceName string
 
 	// Only forward IPv4 traffic
 	DisableIPv6 bool
@@ -114,7 +121,7 @@ func (opts *Opts) ApplyDefaults() *Opts {
 
 type Proxy interface {
 	// Serve starts proxying and blocks until finished
-	Serve() error
+	Serve(context.Context) error
 
 	// AcceptedPackets is the count of accepted packets
 	AcceptedPackets() int
@@ -144,30 +151,19 @@ type proxy struct {
 	numUdpConns     int64
 
 	opts       *Opts
-	proto      tcpip.NetworkProtocolNumber
-	downstream io.ReadWriter
-
-	pktIn      chan ipPacket
 
 	ipstack *stack.Stack
-	linkEP    *channel.Endpoint
-
-	toDownstream chan stack.PacketBufferPtr
+	linkEP  stack.LinkEndpoint
 
 	mu sync.Mutex
-
-	writeHandle *channel.NotificationHandle
-
-	closeable
 }
 
-func (p *proxy) Serve() error {
+func (p *proxy) Serve(ctx context.Context) error {
 	log.Debug("ipproxy serving traffic")
 
-	serveCtx, cancel := context.WithCancel(context.Background())
 	go func() {
-		<-p.closeCh
-		cancel()
+		<-ctx.Done()
+		p.Close()
 	}()
 
 	// tcpReceiveBufferSize if set to zero, the default receive window buffer size is used instead.
@@ -178,16 +174,20 @@ func (p *proxy) Serve() error {
 
 	p.ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
 	p.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
-	go p.copyToDownstream(serveCtx)
-	go p.copyFromUpstream()
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go p.copyToUpstream(&wg)
-	return p.readDownstreamPackets(&wg)
+
+	p.ipstack.Wait()
+
+	return nil
 }
 
-func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
+func (p *proxy) Close() error {
+	if p.ipstack != nil {
+		p.ipstack.Close()
+	}
+	return nil
+}
 
+func New(opts *Opts) (Proxy, error) {
 	// Default options
 	opts = opts.ApplyDefaults()
 	networkProtocols := []stack.NetworkProtocolFactory{ipv4.NewProtocol}
@@ -203,8 +203,20 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 		log.Errorf("could not enable TCP SACK: %v", err)
 		return nil, fmt.Errorf("could not enable TCP SACK: %v", err)
 	}
-	linkEP := channel.New(512, uint32(opts.MTU), "")
-	if err := ipstack.CreateNIC(nicID, linkEP); err != nil {
+	var linkEndpoint stack.LinkEndpoint
+	if opts.Device != nil {
+		linkEndpoint = opts.Device
+	} else if opts.DeviceName != "" {
+		device, err := parseDevice(opts.DeviceName, uint32(opts.MTU))
+		if err != nil {
+			return nil, err
+		}
+		linkEndpoint = device
+	} else {
+		linkEndpoint = channel.New(512, uint32(opts.MTU), "")
+	}
+
+	if err := ipstack.CreateNIC(nicID, linkEndpoint); err != nil {
 		log.Errorf("could not create netstack NIC: %v", err)
 		return nil, fmt.Errorf("could not create netstack NIC: %v", err)
 	}
@@ -230,17 +242,8 @@ func New(downstream io.ReadWriter, opts *Opts) (Proxy, error) {
 
 	p := &proxy{
 		opts:         opts,
-		proto:        ipv4.ProtocolNumber,
-		downstream:   downstream,
 		ipstack:      ipstack,
-		linkEP: 	  linkEP,
-		pktIn:        make(chan ipPacket, 1000),
-		toDownstream: make(chan stack.PacketBufferPtr),
-		closeable: closeable{
-			closeCh:           make(chan struct{}),
-			readyToFinalizeCh: make(chan struct{}),
-			closedCh:          make(chan struct{}),
-		},
+		linkEP: 	  linkEndpoint,
 	}
 
 	return p, nil
@@ -264,98 +267,3 @@ func addSubnetAddress(ipstack *stack.Stack, ip netip.Addr) error {
 	}
 	return nil
 }
-
-func (p *proxy) copyToDownstream(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			if ptr := p.linkEP.ReadContext(ctx); ptr != nil {
-				select {
-				case <-ctx.Done():
-					return
-				case p.toDownstream <- ptr.Clone():
-					continue
-				}
-			}
-		}
-	}
-}
-
-func (p *proxy) copyFromUpstream() {
-	defer p.Close()
-
-	for {
-		select {
-		case <-p.closedCh:
-			return
-		case pktInfo := <-p.toDownstream:
-			pkt := make([]byte, 0, p.opts.MTU)
-			for _, view := range pktInfo.AsSlices() {
-				pkt = append(pkt, view...)
-			}
-
-			_, err := p.downstream.Write(pkt)
-			pktInfo.DecRef()
-			if err != nil {
-				log.Errorf("Unexpected error writing to downstream: %v", err)
-				return
-			}
-		}
-	}
-}
-
-func (p *proxy) copyToUpstream(wg *sync.WaitGroup) {
-	defer wg.Done()
-	defer p.closeNow()
-	defer p.ipstack.Close()
-
-	for {
-		select {
-		case pkt := <-p.pktIn:
-			switch pkt.ipProto {
-			case IPProtocolICMP:
-				fallthrough
-			case IPProtocolUDP:
-				fallthrough
-			case IPProtocolTCP:
-				p.acceptedPacket()
-				p.linkEP.InjectInbound(ipv4.ProtocolNumber, stack.NewPacketBuffer(stack.PacketBufferOptions{
-					Payload: buffer.MakeWithData(pkt.raw)},
-				))
-			default:
-				p.rejectedPacket()
-				log.Debugf("Unknown IP protocol, ignoring: %v", pkt.ipProto)
-				continue
-			}
-		case <-p.closeCh:
-			return
-		}
-	}
-}
-
-func (p *proxy) readDownstreamPackets(wg *sync.WaitGroup) (finalErr error) {
-	defer wg.Wait() // wait for copyToUpstream to finish with all of its cleanup
-	defer p.closeNow()
-	b := make([]byte, p.opts.MTU)
-	for {
-		n, err := p.downstream.Read(b)
-		if err != nil {
-			if err == io.EOF {
-				return err
-			}
-			return errors.New("Unexpected error reading from downstream: %v", err)
-		}
-		raw := b[:n]
-		pkt, err := parseIPPacket(raw)
-		if err != nil {
-			log.Debugf("Error on inbound packet, ignoring: %v", err)
-			p.rejectedPacket()
-			continue
-		}
-
-		p.pktIn <- pkt
-	}
-}
-

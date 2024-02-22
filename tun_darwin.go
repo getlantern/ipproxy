@@ -1,7 +1,6 @@
 package ipproxy
 
 import (
-	"io"
 	"fmt"
 	"net"
 	"os/exec"
@@ -9,7 +8,11 @@ import (
 	"strings"
 
 	"github.com/getlantern/errors"
-	"github.com/songgao/water"
+	"github.com/xjasonlyu/tun2socks/v2/core/device"
+)
+
+const (
+	offset     = 4 /* 4 bytes TUN_PI */
 )
 
 func isIPv4(ip net.IP) bool {
@@ -21,18 +24,16 @@ func isIPv6(ip net.IP) bool {
 }
 
 // TUNDevice creates a TUN device with the given name and configures an interface for that TUN device
-func TUNDevice(name, addr, gw, netmask string, mtu int) (io.ReadWriteCloser, error) {
-	tun, err := water.New(water.Config{
-		DeviceType: water.TUN,
-	})
+func TUNDevice(name, addr, gw, netmask string, mtu int) (device.Device, error) {
+	device, err := parseDevice(name, uint32(mtu))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create tun: %w", err)
 	}
-	name = tun.Name()
-	ip := net.ParseIP(addr)
-	if ip == nil {
-		return nil, errors.New("invalid IP address")
-	}
+
+   ip := net.ParseIP(addr)
+   if ip == nil {
+           return nil, errors.New("invalid IP address")
+    }
 
 	var params string
 	if isIPv4(ip) {
@@ -55,5 +56,5 @@ func TUNDevice(name, addr, gw, netmask string, mtu int) (io.ReadWriteCloser, err
 		return nil, err
 	}
 	log.Debugf("Created TUN device named %v", name)
-	return tun, nil
+	return device, nil
 }
