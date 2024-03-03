@@ -40,7 +40,7 @@ const (
 	IPProtocolTCP  = 6
 	IPProtocolUDP  = 17
 
-	nicID          = 1
+	nicID = 1
 )
 
 type Opts struct {
@@ -120,6 +120,10 @@ func (opts *Opts) ApplyDefaults() *Opts {
 }
 
 type Proxy interface {
+	Device() device.Device
+
+	Endpoint() *channel.Endpoint
+
 	// Serve starts proxying and blocks until finished
 	Serve(context.Context) error
 
@@ -140,7 +144,7 @@ type Proxy interface {
 
 	// Close shuts down the proxy in an orderly fashion and blocks until shutdown
 	// is complete.
- 	Close() error
+	Close() error
 }
 
 type proxy struct {
@@ -150,10 +154,12 @@ type proxy struct {
 	numTcpConns     int64
 	numUdpConns     int64
 
-	opts       *Opts
+	opts *Opts
 
 	ipstack *stack.Stack
+	chEP    *channel.Endpoint
 	linkEP  stack.LinkEndpoint
+	device  device.Device
 
 	mu sync.Mutex
 }
@@ -180,6 +186,14 @@ func (p *proxy) Serve(ctx context.Context) error {
 	return nil
 }
 
+func (p *proxy) Device() device.Device {
+	return p.device
+}
+
+func (p *proxy) Endpoint() *channel.Endpoint {
+	return p.chEP
+}
+
 func (p *proxy) Close() error {
 	if p.ipstack != nil {
 		p.ipstack.Close()
@@ -204,16 +218,20 @@ func New(opts *Opts) (Proxy, error) {
 		return nil, fmt.Errorf("could not enable TCP SACK: %v", err)
 	}
 	var linkEndpoint stack.LinkEndpoint
+	var chEP *channel.Endpoint
+	device := opts.Device
 	if opts.Device != nil {
 		linkEndpoint = opts.Device
 	} else if opts.DeviceName != "" {
-		device, err := parseDevice(opts.DeviceName, uint32(opts.MTU))
+		var err error
+		device, err = parseDevice(opts.DeviceName, uint32(opts.MTU))
 		if err != nil {
 			return nil, err
 		}
 		linkEndpoint = device
 	} else {
-		linkEndpoint = channel.New(512, uint32(opts.MTU), "")
+		chEP = channel.New(512, uint32(opts.MTU), "")
+		linkEndpoint = chEP
 	}
 
 	if err := ipstack.CreateNIC(nicID, linkEndpoint); err != nil {
@@ -241,9 +259,11 @@ func New(opts *Opts) (Proxy, error) {
 	}
 
 	p := &proxy{
-		opts:         opts,
-		ipstack:      ipstack,
-		linkEP: 	  linkEndpoint,
+		chEP:    chEP,
+		device:  device,
+		opts:    opts,
+		ipstack: ipstack,
+		linkEP:  linkEndpoint,
 	}
 
 	return p, nil
