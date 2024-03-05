@@ -4,18 +4,16 @@ go 1.21.4
 
 require (
 	github.com/getlantern/errors v1.0.3
-	github.com/getlantern/eventual v0.0.0-20180125201821-84b02499361b
 	github.com/getlantern/fdcount v0.0.0-20190912142506-f89afd7367c4
 	github.com/getlantern/golog v0.0.0-20230503153817-8e72de7e0a65
-	github.com/songgao/water v0.0.0-20190725173103-fd331bda3f4b
 	github.com/stretchr/testify v1.8.4
+	github.com/xjasonlyu/tun2socks/v2 v2.5.2
 	gvisor.dev/gvisor v0.0.0-20240212194444-1796ac7f1d01
 )
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/getlantern/context v0.0.0-20220418194847-3d5e7a086201 // indirect
-	github.com/getlantern/grtrack v0.0.0-20160824195228-cbf67d3fa0fd // indirect
 	github.com/getlantern/hex v0.0.0-20220104173244-ad7e4b9194dc // indirect
 	github.com/getlantern/hidden v0.0.0-20220104173330-f221c5a24770 // indirect
 	github.com/getlantern/mtime v0.0.0-20200417132445-23682092d1f7 // indirect
@@ -26,7 +24,6 @@ require (
 	github.com/google/btree v1.1.2 // indirect
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/xjasonlyu/tun2socks/v2 v2.5.2 // indirect
 	go.opentelemetry.io/otel v1.22.0 // indirect
 	go.opentelemetry.io/otel/metric v1.22.0 // indirect
 	go.opentelemetry.io/otel/trace v1.22.0 // indirect

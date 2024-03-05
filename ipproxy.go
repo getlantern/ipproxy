@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"sync"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -40,7 +39,7 @@ const (
 	IPProtocolTCP  = 6
 	IPProtocolUDP  = 17
 
-	nicID          = 1
+	nicID = 1
 )
 
 type Opts struct {
@@ -140,7 +139,7 @@ type Proxy interface {
 
 	// Close shuts down the proxy in an orderly fashion and blocks until shutdown
 	// is complete.
- 	Close() error
+	Close() error
 }
 
 type proxy struct {
@@ -150,12 +149,10 @@ type proxy struct {
 	numTcpConns     int64
 	numUdpConns     int64
 
-	opts       *Opts
+	opts *Opts
 
 	ipstack *stack.Stack
 	linkEP  stack.LinkEndpoint
-
-	mu sync.Mutex
 }
 
 func (p *proxy) Serve(ctx context.Context) error {
@@ -241,9 +238,9 @@ func New(opts *Opts) (Proxy, error) {
 	}
 
 	p := &proxy{
-		opts:         opts,
-		ipstack:      ipstack,
-		linkEP: 	  linkEndpoint,
+		opts:    opts,
+		ipstack: ipstack,
+		linkEP:  linkEndpoint,
 	}
 
 	return p, nil
