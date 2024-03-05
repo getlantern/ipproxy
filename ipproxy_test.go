@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/stretchr/testify/require"
 	"io"
 	"net"
 	"os/exec"
@@ -15,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/getlantern/fdcount"
 	"github.com/stretchr/testify/assert"
@@ -31,7 +32,7 @@ var (
 
 func TestRoundtrip(t *testing.T) {
 
-	dev, err := TUNDevice("tun5", "10.0.1.2", "255.255.255.0", 1500)
+	dev, err := TUNDevice("tun5", "10.0.1.2", "10.0.2.1", "255.255.255.0", 1500)
 	require.NoError(t, err)
 	t.Cleanup(func() { dev.Close() })
 
@@ -57,7 +58,7 @@ func TestRoundtrip(t *testing.T) {
 	log.Debugf("Outbound UDP will use %v", laddrUDP)
 
 	var d net.Dialer
-	p, err := New(dev, &Opts{
+	p, err := New(&Opts{
 		IdleTimeout:   70 * time.Second,
 		StatsInterval: 3 * time.Second,
 		DialTCP: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -94,7 +95,7 @@ func TestRoundtrip(t *testing.T) {
 			result.Write(buf[:n])
 		}
 	}()
-	go p.Serve()
+	go p.Serve(context.Background())
 
 	// execute: `sudo route add -host 185.85.17.95 dev tun5`
 	// Add a route to the host 185.85.17.95 using the tun5 device
@@ -198,7 +199,7 @@ func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw 
 	atomic.StoreInt64(&serverTCPConnections, 0)
 	ip := "127.0.0.1"
 
-	dev, err := TUNDevice("", addr, "255.255.255.0", 1500)
+	dev, err := TUNDevice("", addr, gw, "255.255.255.0", 1500)
 	if err != nil {
 		if strings.HasSuffix(err.Error(), "operation not permitted") {
 			t.Log("This test requires root access. Compile, then run with root privileges. See the README for more details.")
@@ -208,7 +209,7 @@ func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw 
 	defer dev.Close()
 
 	d := &net.Dialer{}
-	p, err := New(dev, &Opts{
+	p, err := New(&Opts{
 		IdleTimeout:   idleTimeout,
 		StatsInterval: 1 * time.Second,
 		DialTCP: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -229,7 +230,7 @@ func doTest(t *testing.T, loops int, idleTimeout time.Duration, addr string, gw 
 
 	wg.Add(1)
 	go func() {
-		if err := p.Serve(); err != nil {
+		if err := p.Serve(context.Background()); err != nil {
 			log.Error(err)
 		}
 		wg.Done()
