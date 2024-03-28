@@ -27,16 +27,16 @@ func relay(left, right net.Conn, waitTimeout time.Duration) {
 
 	go func() {
 		defer wg.Done()
-		buf := acquireBuffer()
-		defer releaseBuffer(buf)
+		buf := acquire()
+		defer release(buf)
 
 		copyBuffer(right, left, buf, waitTimeout)
 	}()
 
 	go func() {
 		defer wg.Done()
-		buf := acquireBuffer()
-		defer releaseBuffer(buf)
+		buf := acquire()
+		defer release(buf)
 
 		copyBuffer(left, right, buf, waitTimeout)
 	}()
