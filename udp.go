@@ -39,6 +39,7 @@ func (p *proxy) onUDP(r *udp.ForwarderRequest) {
 		local := gonet.NewUDPConn(&wq, ep)
 		defer local.Close()
 		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 		addr := fmt.Sprintf("%s:%d", sess.LocalAddress.String(), sess.LocalPort)
 		remote, err := p.opts.DialUDP(ctx, "udp", addr)
 		if err != nil {
@@ -47,7 +48,5 @@ func (p *proxy) onUDP(r *udp.ForwarderRequest) {
 		}
 		defer remote.Close()
 		relay(local, remote, udpWaitTimeout)
-		cancel()
 	}()
 }
-
