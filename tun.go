@@ -33,5 +33,5 @@ func parseDevice(s string, mtu uint32) (device.Device, error) {
 }
 
 func parseFD(u *url.URL, mtu uint32) (device.Device, error) {
-	return fdbased.Open(u.Host, mtu)
+	return fdbased.Open(u.Host, mtu, 0)
 }
