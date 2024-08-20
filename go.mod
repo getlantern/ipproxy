@@ -10,8 +10,8 @@ require (
 	github.com/getlantern/golog v0.0.0-20230503153817-8e72de7e0a65
 	github.com/seancfoley/ipaddress-go v1.6.0
 	github.com/stretchr/testify v1.9.0
-	github.com/xjasonlyu/tun2socks/v2 v2.5.3-0.20240722005329-e083dafcf534
-	gvisor.dev/gvisor v0.0.0-20240713103206-39d6c232e61d
+	github.com/xjasonlyu/tun2socks/v2 v2.5.2
+	gvisor.dev/gvisor v0.0.0-20240212194444-1796ac7f1d01
 )
 
 require (

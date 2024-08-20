@@ -62,8 +62,8 @@ github.com/stretchr/testify v1.7.1/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/
 github.com/stretchr/testify v1.8.0/go.mod h1:yNjHg4UonilssWZ8iaSj1OCr/vHnekPRkoO+kdMU+MU=
 github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsTg=
 github.com/stretchr/testify v1.9.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
-github.com/xjasonlyu/tun2socks/v2 v2.5.3-0.20240722005329-e083dafcf534 h1:bcG0TcUdajS3bQVuAjzcT7zYQTB7UCgJErkxIcmtv+s=
-github.com/xjasonlyu/tun2socks/v2 v2.5.3-0.20240722005329-e083dafcf534/go.mod h1:JFS6ZPCripW8zlqeE1wMPZ3cKzY1yXmFTrckquUfBJ4=
+github.com/xjasonlyu/tun2socks/v2 v2.5.2 h1:rbfaTSLzqMezs4Qya/EL777/uMhtyE57SIV7sa1m/Pc=
+github.com/xjasonlyu/tun2socks/v2 v2.5.2/go.mod h1:BzpNKVpWyi+yC8Cuo4bFVGtjtEX38IRhnc+A9CH9sZA=
 github.com/yuin/goldmark v1.3.5/go.mod h1:mwnBkeHKe2W/ZEtQ+71ViKU8L12m81fl3OWwC1Zlc8k=
 go.opentelemetry.io/otel v1.9.0/go.mod h1:np4EoPGzoPs3O67xUVNoPPcmSvsfOxNlNA4F4AC+0Eo=
 go.opentelemetry.io/otel v1.19.0 h1:MuS/TNf4/j4IXsZuJegVzI1cwut7Qc00344rgH7p8bs=
@@ -127,5 +127,5 @@ gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C
 gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
 gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
-gvisor.dev/gvisor v0.0.0-20240713103206-39d6c232e61d h1:dFTIljP/5ReqgM7nMR4DauApFatUaSP8r9btX0sd8a8=
-gvisor.dev/gvisor v0.0.0-20240713103206-39d6c232e61d/go.mod h1:sxc3Uvk/vHcd3tj7/DHVBoR5wvWT/MmRq2pj7HRJnwU=
+gvisor.dev/gvisor v0.0.0-20240212194444-1796ac7f1d01 h1:9aSKbg6Os76z3tnEw2ODxrg5vtnIAMsPXGPIPv611mM=
+gvisor.dev/gvisor v0.0.0-20240212194444-1796ac7f1d01/go.mod h1:YcCCAniKhCIGGvWxOobcre6euvNQON7nZCtMcVYO9rA=
