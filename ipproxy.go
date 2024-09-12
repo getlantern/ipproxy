@@ -21,7 +21,6 @@ import (
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
-	"github.com/xjasonlyu/tun2socks/v2/core/device"
 )
 
 var (
@@ -58,7 +57,7 @@ type Opts struct {
 	DebugPackets bool
 
 	// the network layer device ipproxy should be configured to use
-	Device device.Device
+	Device Device
 
 	// the name of the network layer device ipproxy should be configured to use
 	DeviceName string
@@ -151,6 +150,7 @@ type proxy struct {
 
 	opts *Opts
 
+	device  Device
 	ipstack *stack.Stack
 	linkEP  stack.LinkEndpoint
 }
@@ -181,6 +181,9 @@ func (p *proxy) Close() error {
 	if p.ipstack != nil {
 		p.ipstack.Close()
 	}
+	if p.device != nil {
+		p.device.Close()
+	}
 	return nil
 }
 
@@ -201,6 +204,7 @@ func New(opts *Opts) (Proxy, error) {
 		return nil, fmt.Errorf("could not enable TCP SACK: %v", err)
 	}
 	var linkEndpoint stack.LinkEndpoint
+	var device Device
 	if opts.Device != nil {
 		linkEndpoint = opts.Device
 	} else if opts.DeviceName != "" {
@@ -239,6 +243,7 @@ func New(opts *Opts) (Proxy, error) {
 
 	p := &proxy{
 		opts:    opts,
+		device:  device,
 		ipstack: ipstack,
 		linkEP:  linkEndpoint,
 	}

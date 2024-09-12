@@ -3,35 +3,25 @@ package ipproxy
 import (
 	"fmt"
 	"net/url"
-	"strings"
-
-	"github.com/xjasonlyu/tun2socks/v2/core/device"
-	"github.com/xjasonlyu/tun2socks/v2/core/device/fdbased"
-	"github.com/xjasonlyu/tun2socks/v2/core/device/tun"
+	"strconv"
 )
 
-func parseDevice(s string, mtu uint32) (device.Device, error) {
-	if !strings.Contains(s, "://") {
-		s = fmt.Sprintf("%s://%s", tun.Driver /* default driver */, s)
-	}
+const (
+	defaultMTU    = 1500
+	fdbasedDriver = "fd"
+)
 
-	u, err := url.Parse(s)
+func parseDevice(name string, mtu uint32) (Device, error) {
+	u, err := url.Parse(name)
+	if err == nil {
+		name = u.Host
+	}
+	fd, err := strconv.Atoi(name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot open fd: %s", name)
 	}
-
-	driver := strings.ToLower(u.Scheme)
-
-	switch driver {
-	case fdbased.Driver:
-		return parseFD(u, mtu)
-	case tun.Driver:
-		return tun.Open(u.Host, mtu)
-	default:
-		return nil, fmt.Errorf("unsupported driver: %s", driver)
+	if mtu == 0 {
+		mtu = defaultMTU
 	}
-}
-
-func parseFD(u *url.URL, mtu uint32) (device.Device, error) {
-	return fdbased.Open(u.Host, mtu, 0)
+	return open(fd, mtu, 0)
 }
