@@ -206,13 +206,13 @@ func New(opts *Opts) (Proxy, error) {
 	var linkEndpoint stack.LinkEndpoint
 	var device Device
 	if opts.Device != nil {
-		linkEndpoint = opts.Device
+		linkEndpoint = opts.Device.Endpoint()
 	} else if opts.DeviceName != "" {
 		device, err := parseDevice(opts.DeviceName, uint32(opts.MTU))
 		if err != nil {
 			return nil, err
 		}
-		linkEndpoint = device
+		linkEndpoint = device.Endpoint()
 	} else {
 		linkEndpoint = channel.New(512, uint32(opts.MTU), "")
 	}

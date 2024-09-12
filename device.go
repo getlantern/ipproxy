@@ -18,9 +18,13 @@ type device struct {
 
 // Device is a stack.LinkEndpoint implemented by network layer devices (e.g. tun)
 type Device interface {
-	stack.LinkEndpoint
+	Endpoint() stack.LinkEndpoint
 	Name() string
-	Close()
+	Close() error
+}
+
+func (d *device) Endpoint() stack.LinkEndpoint {
+	return d.LinkEndpoint
 }
 
 func (d *device) Name() string {
@@ -30,7 +34,7 @@ func (d *device) Name() string {
 	return d.name
 }
 
-func (d *device) Close() {
+func (d *device) Close() error {
 	defer d.LinkEndpoint.Close()
-	_ = unix.Close(d.fd)
+	return unix.Close(d.fd)
 }

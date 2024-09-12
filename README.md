@@ -22,5 +22,5 @@ Be careful if you choose to run the Go tool with the sudo command (e.g. `sudo go
 
 ## Credits
 
-- [google/gvisor](https://github.com/google/gvisor)
+- [gvisor](gvisor.dev/gvisor)
 - [tun2socks](https://github.com/xjasonlyu/tun2socks)
