@@ -20,6 +20,7 @@ type device struct {
 type Device interface {
 	stack.LinkEndpoint
 	Name() string
+	Close()
 }
 
 func (d *device) Name() string {
