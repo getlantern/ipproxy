@@ -19,3 +19,8 @@ Tests in this package require root access. The easiest way to test is to compile
 Tests currently only run on Linux.
 
 Be careful if you choose to run the Go tool with the sudo command (e.g. `sudo go test`). This can cause issues if the tool attempts to download missing dependencies. Namely, the Go tool may not be able to download anything as Git will likely be using a different SSH keypair (or no keypair at all). Worse, the Go tool may create folders in $GOPATH/pkg/mod/cache owned by the root user. This can disrupt future use of the Go tool, even outside of this repository.
+
+## Credits
+
+- [google/gvisor](https://github.com/google/gvisor)
+- [tun2socks](https://github.com/xjasonlyu/tun2socks)

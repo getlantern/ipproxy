@@ -21,7 +21,6 @@ import (
 
 	"github.com/getlantern/errors"
 	"github.com/getlantern/golog"
-	"github.com/xjasonlyu/tun2socks/v2/core/device"
 )
 
 var (
@@ -58,7 +57,7 @@ type Opts struct {
 	DebugPackets bool
 
 	// the network layer device ipproxy should be configured to use
-	Device device.Device
+	Device Device
 
 	// the name of the network layer device ipproxy should be configured to use
 	DeviceName string
