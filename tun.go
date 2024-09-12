@@ -15,7 +15,7 @@ const (
 func parseDevice(name string, mtu uint32) (Device, error) {
 	u, err := url.Parse(name)
 	if err == nil {
-		name = u.Scheme
+		name = u.Host
 	}
 	fd, err := strconv.Atoi(strings.ToLower(name))
 	if err != nil {
