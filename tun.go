@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -14,9 +15,9 @@ const (
 func parseDevice(name string, mtu uint32) (Device, error) {
 	u, err := url.Parse(name)
 	if err == nil {
-		name = u.Host
+		name = u.Scheme
 	}
-	fd, err := strconv.Atoi(name)
+	fd, err := strconv.Atoi(strings.ToLower(name))
 	if err != nil {
 		return nil, fmt.Errorf("cannot open fd: %s", name)
 	}

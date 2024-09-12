@@ -8,11 +8,10 @@ import (
 	"strings"
 
 	"github.com/getlantern/errors"
-	"github.com/xjasonlyu/tun2socks/v2/core/device"
 )
 
 const (
-	offset     = 4 /* 4 bytes TUN_PI */
+	offset = 4 /* 4 bytes TUN_PI */
 )
 
 func isIPv4(ip net.IP) bool {
@@ -24,16 +23,16 @@ func isIPv6(ip net.IP) bool {
 }
 
 // TUNDevice creates a TUN device with the given name and configures an interface for that TUN device
-func TUNDevice(name, addr, gw, netmask string, mtu int) (device.Device, error) {
+func TUNDevice(name, addr, gw, netmask string, mtu int) (Device, error) {
 	device, err := parseDevice(name, uint32(mtu))
 	if err != nil {
 		return nil, fmt.Errorf("create tun: %w", err)
 	}
 
-   ip := net.ParseIP(addr)
-   if ip == nil {
-           return nil, errors.New("invalid IP address")
-    }
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return nil, errors.New("invalid IP address")
+	}
 
 	var params string
 	if isIPv4(ip) {
