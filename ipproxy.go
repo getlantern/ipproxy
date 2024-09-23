@@ -227,13 +227,13 @@ func (p *proxy) Start(ctx context.Context) error {
 	// tcpReceiveBufferSize if set to zero, the default receive window buffer size is used instead.
 	const tcpReceiveBufferSize = 0
 	const maxInFlightConnectionAttempts = 1024
-	tcpFwd := tcp.NewForwarder(p.ipstack, tcpReceiveBufferSize, maxInFlightConnectionAttempts, p.onTCP)
-	udpFwd := udp.NewForwarder(p.ipstack, p.onUDP)
+	tcpFwd := tcp.NewForwarder(ipstack, tcpReceiveBufferSize, maxInFlightConnectionAttempts, p.onTCP)
+	udpFwd := udp.NewForwarder(ipstack, p.onUDP)
 
-	p.ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
-	p.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
+	ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
+	ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
 
-	p.ipstack.Wait()
+	ipstack.Wait()
 
 	return nil
 }
