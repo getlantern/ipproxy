@@ -250,6 +250,7 @@ func (p *proxy) setStack(s *stack.Stack) {
 	p.mu.Unlock()
 }
 
+// Stop shuts down the proxy in an orderly fashion and blocks until shutdown is complete.
 func (p *proxy) Stop() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
