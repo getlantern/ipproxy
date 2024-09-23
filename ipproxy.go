@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sync"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -118,9 +119,6 @@ func (opts *Opts) ApplyDefaults() *Opts {
 }
 
 type Proxy interface {
-	// Serve starts proxying and blocks until finished
-	Serve(context.Context) error
-
 	// AcceptedPackets is the count of accepted packets
 	AcceptedPackets() int
 
@@ -136,9 +134,11 @@ type Proxy interface {
 	// NumUDPConns is the number of UDP "connections" being tracked
 	NumUDPConns() int
 
-	// Close shuts down the proxy in an orderly fashion and blocks until shutdown
+	// Start starts proxying and blocks until finished
+	Start(context.Context) error
+	// Stop shuts down the proxy in an orderly fashion and blocks until shutdown
 	// is complete.
-	Close() error
+	Stop() error
 }
 
 type proxy struct {
@@ -150,89 +150,72 @@ type proxy struct {
 
 	opts *Opts
 
+	mu      sync.Mutex
 	device  Device
 	ipstack *stack.Stack
-	linkEP  stack.LinkEndpoint
 }
 
-func (p *proxy) Serve(ctx context.Context) error {
-	log.Debug("ipproxy serving traffic")
+func New(opts *Opts) Proxy {
+	// Default options
+	return &proxy{
+		// Default options
+		opts: opts.ApplyDefaults(),
+	}
+}
 
+func (p *proxy) Start(ctx context.Context) error {
+	log.Debug("ipproxy serving traffic")
+	opts := p.opts
 	go func() {
 		<-ctx.Done()
-		p.Close()
+		p.Stop()
 	}()
 
-	// tcpReceiveBufferSize if set to zero, the default receive window buffer size is used instead.
-	const tcpReceiveBufferSize = 0
-	const maxInFlightConnectionAttempts = 1024
-	tcpFwd := tcp.NewForwarder(p.ipstack, tcpReceiveBufferSize, maxInFlightConnectionAttempts, p.onTCP)
-	udpFwd := udp.NewForwarder(p.ipstack, p.onUDP)
-
-	p.ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
-	p.ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
-
-	p.ipstack.Wait()
-
-	return nil
-}
-
-func (p *proxy) Close() error {
-	if p.ipstack != nil {
-		p.ipstack.Close()
-	}
-	if p.device != nil {
-		p.device.Close()
-	}
-	return nil
-}
-
-func New(opts *Opts) (Proxy, error) {
-	// Default options
-	opts = opts.ApplyDefaults()
 	networkProtocols := []stack.NetworkProtocolFactory{ipv4.NewProtocol}
 	if !opts.DisableIPv6 {
 		networkProtocols = append(networkProtocols, ipv6.NewProtocol)
 	}
-	ipstack := stack.New(stack.Options{
-		NetworkProtocols:   networkProtocols,
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
-	})
-	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
-	if err := ipstack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt); err != nil {
-		log.Errorf("could not enable TCP SACK: %v", err)
-		return nil, fmt.Errorf("could not enable TCP SACK: %v", err)
-	}
+
 	var linkEndpoint stack.LinkEndpoint
-	var device Device
 	if opts.Device != nil {
 		linkEndpoint = opts.Device.Endpoint()
 	} else if opts.DeviceName != "" {
 		device, err := parseDevice(opts.DeviceName, uint32(opts.MTU))
 		if err != nil {
-			return nil, err
+			return err
 		}
+		p.setDevice(device)
 		linkEndpoint = device.Endpoint()
 	} else {
 		linkEndpoint = channel.New(512, uint32(opts.MTU), "")
 	}
+	ipstack := stack.New(stack.Options{
+		NetworkProtocols:   networkProtocols,
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
+	})
+	p.setStack(ipstack)
+	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
+	if err := ipstack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt); err != nil {
+		log.Errorf("could not enable TCP SACK: %v", err)
+		return fmt.Errorf("could not enable TCP SACK: %v", err)
+	}
 
 	if err := ipstack.CreateNIC(nicID, linkEndpoint); err != nil {
 		log.Errorf("could not create netstack NIC: %v", err)
-		return nil, fmt.Errorf("could not create netstack NIC: %v", err)
+		return fmt.Errorf("could not create netstack NIC: %v", err)
 	}
 	if err := ipstack.SetPromiscuousMode(nicID, true); err != nil {
 		log.Errorf("Unable to set promiscuous mode: %v", err)
-		return nil, errors.New("Unable to set promiscuous mode: %v", err)
+		return errors.New("Unable to set promiscuous mode: %v", err)
 	}
 	// Enable spoofing on the interface to allow replying from addresses other than those set on the interface
 	if err := ipstack.SetSpoofing(nicID, true); err != nil {
-		return nil, fmt.Errorf("failed to enable spoofing on NIC: %v", err)
+		return fmt.Errorf("failed to enable spoofing on NIC: %v", err)
 	}
 
 	for _, ip := range opts.LocalAddresses {
 		if err := addSubnetAddress(ipstack, ip); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
@@ -241,14 +224,46 @@ func New(opts *Opts) (Proxy, error) {
 		ipstack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: nicID})
 	}
 
-	p := &proxy{
-		opts:    opts,
-		device:  device,
-		ipstack: ipstack,
-		linkEP:  linkEndpoint,
-	}
+	// tcpReceiveBufferSize if set to zero, the default receive window buffer size is used instead.
+	const tcpReceiveBufferSize = 0
+	const maxInFlightConnectionAttempts = 1024
+	tcpFwd := tcp.NewForwarder(ipstack, tcpReceiveBufferSize, maxInFlightConnectionAttempts, p.onTCP)
+	udpFwd := udp.NewForwarder(ipstack, p.onUDP)
 
-	return p, nil
+	ipstack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
+	ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
+
+	ipstack.Wait()
+
+	return nil
+}
+
+func (p *proxy) setDevice(device Device) {
+	p.mu.Lock()
+	p.device = device
+	p.mu.Unlock()
+}
+
+func (p *proxy) setStack(s *stack.Stack) {
+	p.mu.Lock()
+	p.ipstack = s
+	p.mu.Unlock()
+}
+
+// Stop shuts down the proxy in an orderly fashion and blocks until shutdown is complete.
+func (p *proxy) Stop() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ipstack != nil {
+		p.ipstack.Close()
+		p.ipstack.Wait()
+		p.ipstack = nil
+	}
+	if p.device != nil {
+		p.device.Close()
+		p.device = nil
+	}
+	return nil
 }
 
 func addSubnetAddress(ipstack *stack.Stack, ip netip.Addr) error {
