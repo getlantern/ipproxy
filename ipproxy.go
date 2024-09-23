@@ -153,7 +153,6 @@ type proxy struct {
 	mu      sync.Mutex
 	device  Device
 	ipstack *stack.Stack
-	linkEP  stack.LinkEndpoint
 }
 
 func New(opts *Opts) Proxy {
